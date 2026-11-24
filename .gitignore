@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Bunny.ai - ignored files
+#
+# This is intentionally stack-neutral. The final implementation language is an
+# open decision. Language-specific entries appear only in the provisional
+# Python section at the end, because Python is the current prototype baseline.
+# ---------------------------------------------------------------------------
+
+# Secrets, credentials and keys
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+*.secrets
+id_rsa*
+id_ed25519*
+id_ecdsa*
+credentials*.json
+service-account*.json
+secrets/
+.secrets/
+
+# Local configuration and personal overrides
+config.local.*
+*.local.toml
+*.local.yaml
+*.local.yml
+*.local.json
+local.settings.*
+*.private.*
+
+# Runtime state, memory and user data
+runtime/
+var/
+data/
+memory/
+memories/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.sqlite-*
+*.db
+*.db-*
+*.db.*
+*.sqlite3.*
+*.db-wal
+*.db-shm
+
+# Exports, backups and caches
+exports/
+backups/
+cache/
+*.bak
+*.backup
+
+# Logs, transcripts and captured audio
+logs/
+*.log
+transcripts/
+recordings/
+audio/
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+
+# Operating system and editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------------------
+# Provisional Python tooling (current recommended prototype baseline)
+# Remove this section if the implementation stack changes.
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
