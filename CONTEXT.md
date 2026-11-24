@@ -9,6 +9,7 @@ Bunny.ai is an open-source, hardware-independent, provider-agnostic personal ass
 ## Current state
 
 - The documentation foundation and first public onboarding pass landed via PRs #1 and #2. The README is the visitor entry point. Canonical specifications live under docs/.
+- The README uses an editable SVG for the product overview. Keep canonical technical diagrams in Mermaid and put qualifications in nearby prose. See [diagram conventions](docs/ARCHITECTURE.md#diagram-conventions).
 - Documents: README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, LICENSE, and docs/{VISION, ARCHITECTURE, AWAKENING, PERSONALITY, MEMORY, PRIVACY, ROADMAP, DECISIONS, REVIEW-2026-11-24}. All relative links resolve.
 - Decision log D-001..D-022: accepted core (licence, documentation-first, no private-prototype import, gateway, local-first memory, deterministic security, budget-before-dispatch); provisional SQLite (D-007) and Pi 4 reference target (D-015); stack, voice, packaging, encryption open. Staged security review gates and community Code of Conduct adopted.
 - All 13 findings from the independent review (MiMo V2.6 Flash, 2026-11-24) recorded in docs/REVIEW-2026-11-24.md are resolved.

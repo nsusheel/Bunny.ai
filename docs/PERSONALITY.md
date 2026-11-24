@@ -9,37 +9,41 @@ inspectable, portable and reversible.
 ## Three layers
 
 ```mermaid
+---
+config:
+  flowchart:
+    nodeSpacing: 16
+    rankSpacing: 26
+    padding: 8
+    subGraphTitleMargin:
+      bottom: 12
+---
 flowchart TB
-    accTitle: Portable local identity and memory
-    accDescr: Stable core identity, evolving personality and knowledge about the user form separate local layers. Users can inspect and correct state. A policy check controls proposed style changes. Relevant state is retrieved for the configured model and can be exported and imported on another device.
-    User([User])
-    subgraph Local["Local persistent state"]
-        Core["1 · Stable core identity<br/>Versioned values and boundaries"]
-        Style["2 · Evolving personality<br/>Style and interaction preferences"]
-        Knowledge["3 · User understanding<br/>Memories with provenance"]
+    accTitle: Three layers of portable identity and memory
+    accDescr: Core identity, evolving personality and user knowledge are distinct layers on the user's hardware. Users can manage and move the state. Models receive scoped context and can propose style changes, which are checked by policy before being applied to evolving personality.
+    subgraph State["Portable local state"]
+        direction TB
+        I["Core identity"]
+        P["Evolving personality"]
+        K["User knowledge"]
+        I ~~~ P ~~~ K
     end
-    Proposal["Proposed style change"] --> Policy{"Personality policy permits?"}
-    Policy -->|"Apply and record"| Style
-    User <-->|"Inspect and edit / reset"| Style
-    User <-->|"Inspect and correct"| Knowledge
-    Local -->|"Retrieve scoped context"| Context["Context for configured model"]
-    Local -->|"Export / import"| Move["State on another device"]
+    U([User]) <--> State
+    State -->|Scoped context| M["Configured model"]
 
     classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
     classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
     classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
-    classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
-    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
-    class Proposal core
-    style Local fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
-    class Core,Style,Knowledge,Move state
-    class Context model
-    class Policy gate
-    class User neutral
+    style State fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    class I core
+    class P,K state
+    class M model
 ```
 
-Keep the layers separate. A change to conversational style must not change safety
-boundaries. A new fact about the user must not silently rewrite the core.
+The user can inspect and manage local state and move it between devices. The configured
+model receives scoped context. Style proposals pass through the deterministic policy
+check described under [How personality evolves](#how-personality-evolves). A style change
+must preserve safety boundaries, and a new fact about the user cannot rewrite the core.
 
 ### Layer 1 - Core identity
 

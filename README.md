@@ -12,29 +12,7 @@ Bunny is a personal assistant designed to run on hardware you control. Its ident
 
 ## How it fits together
 
-```mermaid
-flowchart TB
-    accTitle: Bunny on hardware you control
-    accDescr: You interact with one assistant. Bunny keeps identity and memory on your device, uses your chosen local or hosted model, and accesses optional tools or research through permissions.
-    You([You])
-    Bunny["Bunny · one assistant<br/>On hardware you control"]
-    State[("Identity and<br/>local memory")]
-    Model["Model choice<br/>Local or hosted"]
-    Cap["Optional tools<br/>and research"]
-    You <--> Bunny
-    Bunny <--> State
-    Bunny <--> Model
-    Bunny -.->|"Permission"| Cap
-
-    classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
-    classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
-    classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
-    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
-    class Bunny core
-    class State state
-    class Model model
-    class You,Cap neutral
-```
+![Bunny connects you to identity and memory on your hardware, your choice of a local or hosted model, and optional tools behind permission checks.](docs/assets/bunny-overview.svg)
 
 - **A familiar assistant across changes.** A stable identity and adaptable conversational style are kept separately from what Bunny learns about you.
 - **Curiosity that respects your attention.** Bunny is designed to ask occasional, relevant questions and let you choose what it remembers.
@@ -51,19 +29,21 @@ flowchart TB
 The documentation foundation is complete. **Next is v0.1 Awakening**, a minimal text assistant with one provider, a seed personality, restart-persistent local memory and a pre-dispatch budget check.
 
 ```mermaid
-flowchart TB
+---
+config:
+  flowchart:
+    nodeSpacing: 16
+    rankSpacing: 26
+    padding: 8
+---
+flowchart LR
     accTitle: Bunny development roadmap
-    accDescr: The documentation foundation is complete. Version 0.1 Awakening is next. Growing Personality, Voice and Delegation, Personal Assistant and Community-Ready are future milestones.
-    Done["COMPLETE · Documentation foundation"]
-    Next["NEXT · v0.1 Awakening"]
-    Future["PLANNED<br/>v0.2 Growing Personality<br/>v0.3 Voice and Delegation<br/>v0.4 Personal Assistant<br/>v1.0 Community-Ready"]
-    Done --> Next --> Future
-    classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
-    classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
-    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
-    class Done state
-    class Next gate
-    class Future neutral
+    accDescr: The documentation foundation is complete. Version 0.1 Awakening is next. Versions 0.2 through 1.0 are future milestones.
+    F([Foundation]) --> A([v0.1 Awakening]) -.-> L([v0.2–v1.0])
+    classDef complete fill:#d9f5ef,stroke:#268171,color:#103a34
+    classDef next fill:#fff0cf,stroke:#9d701d,color:#462d0a
+    class F complete
+    class A next
 ```
 
 The [roadmap](docs/ROADMAP.md) defines each milestone’s scope and exit criteria. Milestones have no fixed delivery dates.

@@ -20,47 +20,46 @@ Bunny must never describe cloud inference as private merely because its memory i
 ## Data flows
 
 ```mermaid
+---
+config:
+  flowchart:
+    nodeSpacing: 16
+    rankSpacing: 26
+    padding: 8
+    subGraphTitleMargin:
+      bottom: 12
+---
 flowchart TB
     accTitle: Data crossing Bunny's trust boundaries
-    accDescr: Bunny selects permitted context from local state. Hosted model requests need a budget reservation. Model output and tool results are untrusted. A proposed tool action needs permission, any required user approval, and a reservation if billable.
-    User([User])
-    subgraph Local["User-controlled environment"]
-        State[("Local identity and memory")]
-        Sel["Select permitted context"]
-        Meter{"Budget reserved?"}
-        Gate{"Tool allowed?"}
-        State -->|"Relevant records"| Sel
-        Sel -->|"Model gateway"| Meter
+    accDescr: User sharing choices and relevant local state determine selected context. Hosted inference uses the gateway and requires budget reservation. Tool egress requires permission, any required approval and a reservation when billable. Both external responses return as untrusted data.
+    subgraph Local["User-controlled host"]
+        S[(Local state)] --> C["Context selection"] --> B{"Reserve budget"}
+        P{"Check tool access"}
     end
-    subgraph External["External trust boundary"]
-        Hosted["Hosted model"]
-        Tools["External tools and<br/>research sources"]
+    subgraph External["External services"]
+        H["Hosted model"]
+        T["Tools &amp; sources"]
     end
-    User -->|"Context sharing choice"| Sel
-    User -->|"Approval when required"| Gate
-    Meter <-->|"Selected context out<br/>Untrusted output in"| Hosted
-    Gate <-->|"Approved request out<br/>Reserve if billable<br/>Untrusted result in"| Tools
-    style Local fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
-    style External fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    B <-->|Inference traffic| H
+    P <-->|Tool traffic| T
 
     classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
     classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
     classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
     classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
-    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
-    class State state
-    class Sel core
-    class Meter,Gate gate
-    class Hosted model
-    class User,Tools neutral
+    style Local fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    style External fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    class C core
+    class S state
+    class H model
+    class B,P gate
 ```
 
-This view follows hosted inference and external tool or research traffic. The arrows show
-admission conditions and the data crossing each boundary. Treat model output and retrieved
-content as untrusted data. If either leads to a proposed action, the permission runtime checks
-scope, egress and any required user approval before execution. Billable tool actions require the same
-pre-dispatch accounting boundary as hosted inference. Local inference and optional audio
-are described separately.
+Each crossing carries a request out and untrusted data back into Bunny. For hosted
+inference, the gateway sends only context allowed by the user’s sharing choices and
+reserves budget before dispatch. For tools and research, the permission runtime checks
+scope, egress and any required approval before execution. Billable tool calls require
+a reservation before dispatch. The lines show traffic across the boundary.
 
 | Data | Where it lives | May leave the device | Control |
 |---|---|---|---|
