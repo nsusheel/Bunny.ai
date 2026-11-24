@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 318" width="520" height="318" role="img" aria-labelledby="title desc">
+  <title id="title">Bunny on hardware you control</title>
+  <desc id="desc">You interact with Bunny. Identity and memory stay on your hardware. Bunny can use local or hosted inference and connect to optional external tools with permission.</desc>
+  <style>
+    :root {
+      --paper: #f5f4ee;
+      --ink: #202d2b;
+      --line: #556864;
+      --accent: #2c6055;
+      --accent-ink: #fffdf5;
+      --type: system-ui, sans-serif;
+      --display: Georgia, serif;
+      color-scheme: light dark;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #1b2927;
+        --ink: #f0f2e9;
+        --line: #9cafa8;
+        --accent: #aed3c1;
+        --accent-ink: #152823;
+      }
+    }
+    .paper { fill: var(--paper); }
+    .line { fill: none; stroke: var(--line); stroke-width: 1.6; }
+    .optional { stroke-dasharray: 5 5; }
+    .icon { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .label { fill: var(--ink); font: 600 21px var(--type); text-anchor: middle; }
+    .group { fill: var(--ink); font: 500 19px var(--type); }
+    .seal { fill: var(--accent); }
+    .rabbit { fill: none; stroke: var(--accent-ink); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .bunny { fill: var(--ink); font: bold 40px var(--display); text-anchor: middle; }
+  </style>
+  <rect class="paper" width="520" height="318" rx="14"/>
+  <rect class="line" x="14" y="15" width="333" height="288" rx="10"/>
+  <text class="group" x="31" y="45">Your hardware</text>
+  <text class="group" x="369" y="45">External services</text>
+
+  <g class="line" aria-hidden="true">
+    <path d="M106 129h34 M194 202v24m-64 9v-9h130v9"/>
+    <path d="M244 129h160 M283 129v-23"/>
+    <path class="optional" d="M194 210h135l50 31h35"/>
+  </g>
+
+  <g class="icon" aria-hidden="true">
+    <circle cx="72" cy="112" r="8"/>
+    <path d="M59 135c1-13 25-13 26 0"/>
+    <path d="M130 245l9 4v8c0 5-6 9-9 11-3-2-9-6-9-11v-8z"/>
+    <path d="M253 246h15v20l-7-4-8 4z"/>
+    <rect x="276" y="56" width="14" height="14" rx="2"/>
+    <path d="M273 60h3m-3 6h3m14-6h3m-3 6h3m-13-13v3m6-3v3m-6 14v3m6-3v3"/>
+    <rect x="416" y="108" width="24" height="10" rx="2"/>
+    <rect x="416" y="120" width="24" height="10" rx="2"/>
+    <path d="M421 113h2m-2 12h2m-6 108h22m-22 8h22m-22 8h22m-15-18v4m10 4v4m-11 4v4"/>
+  </g>
+
+  <circle class="seal" cx="194" cy="129" r="44" aria-hidden="true"/>
+  <path class="rabbit" transform="translate(-16 15)" d="M190 123c0-8 4-13 10-16-4-12-4-20 0-20 4 0 8 8 9 18h4c2-10 6-18 10-18 4 1 2 11-2 21 6 3 9 8 9 15 0 10-8 15-20 15s-20-5-20-15zm15-2h.2m10.6 0h.2m-7 7 2 2 2-2" aria-hidden="true"/>
+
+  <text class="label" x="72" y="162">You</text>
+  <text class="bunny" x="194" y="195">Bunny</text>
+  <text class="label" x="130" y="287">Identity</text>
+  <text class="label" x="260" y="287">Memory</text>
+  <text class="label" x="281" y="93">Local model</text>
+  <text class="label" x="428" y="157">Hosted model</text>
+  <text class="label" x="428" y="277">Optional tools</text>
+</svg>

@@ -1,8 +1,8 @@
 # Handover · 2026-11-24
 
-- PR #2 was verified merged into main at `3f22696`. The architecture visualisation branch was created from that synchronised base with a clean working tree.
-- The README now keeps the documentation-only status, ownership, privacy, hardware, costs and v0.1 preview visible. Five disclosures hold examples, origin, logical roles, operating details and later milestone summaries. Engineers and contributors can go directly to canonical docs.
-- Seven Mermaid views cover product, roadmap, components, logical roles, a billable text turn, local identity and memory, and privacy flows. Conventions are in [Architecture](docs/ARCHITECTURE.md#diagram-conventions).
-- The redesigned views preserve deterministic permission checks and pre-dispatch reservations. The specifications leave the integration wiring for billable non-model actions and the exact streaming and persistence ordering open.
-- Local validation used Mermaid 11.17.2 and headless Chrome with temporary dependencies. The preview covered 1120 px and 390 px in both themes, with all five README disclosures exercised. Visible words fell from 2,057 to 403 and total words from 2,057 to 1,199, excluding Mermaid source and diagram labels. The denser canonical diagrams need zoom on mobile.
-- Next milestone remains [v0.1 Awakening](docs/ROADMAP.md#v01---awakening). The reference hardware is unvalidated. Dedicated security and conduct inboxes remain pending for public release.
+- PR #3 merged into main at `9ca4175`. The visual refinement starts from that commit on `docs/visual-design-refinement`.
+- The README keeps the documentation-only status, privacy, hardware and cost caveats visible. Default-visible prose is 403 words and all five disclosures remain. [The product illustration](docs/assets/bunny-overview.svg) is editable SVG with accessible text and a light and dark palette. The rabbit motif is exploratory.
+- Mermaid covers the roadmap, component map, billable text turn, logical roles, identity layers and privacy flows. [Diagram conventions](docs/ARCHITECTURE.md#diagram-conventions) document the division between visual labels and adjacent explanations.
+- Local validation used headless Chrome and Mermaid 11.17.2 at 1120 px and 390 px in both themes. The two README compositions and the baseline were compared locally. The component map improved from 1,354 px to 560 px native width. Dense technical labels may still benefit from zoom on phones.
+- The specifications leave the integration wiring for billable non-model actions and the relative order of streaming, response delivery and persistence open.
+- Next remains [v0.1 Awakening](docs/ROADMAP.md#v01---awakening). The reference hardware is unvalidated. Dedicated security and conduct inboxes are pending.
