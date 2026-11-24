@@ -19,6 +19,10 @@ optimises for modest hardware, honest failure and portability of identity.
 
 ## Component map
 
+The component map below is the **canonical** architecture diagram for Bunny.ai. All
+derived diagrams in other documents must preserve these edge semantics and component
+boundaries.
+
 ```mermaid
 flowchart TB
     subgraph Interaction
@@ -67,18 +71,23 @@ flowchart TB
     NEON <--> MEM
     OTTO <--> MEM
     OTTO --> REF
-    SCOUT --> WEB
+    SCOUT --> PERM
     NEON --> GW
     OTTO --> GW
     SCOUT --> GW
-    GW --> METER
-    METER --> CLOUD
-    METER -. optional .-> LOCALLLM
+    GW <--> METER
+    GW --> CLOUD
+    GW -. optional .-> LOCALLLM
     OTTO --> PERM
     PERM --> TOOLS
+    PERM --> WEB
     MEM <--> DB
     MEM <--> BLOB
 ```
+
+No agent or subsystem may bypass the permission layer to access tools, devices, or the
+external web; similarly, no agent may dispatch billable inference without reserving against
+the budget meter.
 
 ## Responsibilities
 
@@ -92,7 +101,7 @@ flowchart TB
 | Reflection scheduler | Consolidate memories and personality updates in bounded batches. | Make continuous calls, grant permissions or perform external actions. |
 | Model gateway | Normalise provider access, capabilities, streaming, usage and errors. | Promise identical behaviour across all models. |
 | Budget meter | Reserve, record and settle billable attempts; enforce limits. | Allow an unreserved paid request. |
-| Permission layer | Enforce scoped tool and device access before effects. | Delegate authority to model text. |
+| Permission layer | Enforce scoped tool, device and network egress access before effects. | Delegate authority to model text or bypass outbound SSRF filtering. |
 | Storage | Persist local state durably with backup and migration paths. | Be described as encrypted or local-only unless it is. |
 
 ## Request lifecycle
@@ -148,7 +157,8 @@ accounts. A single configured model can serve all three where its capabilities p
 Delegation is explicit and bounded. A child task inherits equal or narrower permissions,
 its own budget reservation and a deadline. Bunny's final answer, when Bunny owns the
 conversation, should use Bunny's configured model rather than quietly presenting a
-worker's cheaper output as Bunny.
+worker's cheaper output as Bunny. Bunny's voice uses Neon's model configuration by default;
+per-agent model overrides apply only when explicitly configured by the user.
 
 The memory service is infrastructure, not an agent. Wake-word detection, scheduling,
 routing and metering are deterministic components, not additional LLM personas.
@@ -175,6 +185,73 @@ The gateway must represent capability differences honestly. A model without tool
 should not be described as tool-capable. A provider without usage metadata should report
 usage as unavailable rather than zero. A fallback must never silently change Bunny's
 designated conversational model without the user's configuration.
+
+### Gateway resilience and charge accounting
+
+The gateway provides resilience against transient provider errors while protecting the
+user's budget:
+
+- **Bounded retry policy:** Retries are restricted to idempotent requests and transient
+  provider failures (HTTP 429, 502, 503, 504). Non-retryable client errors (HTTP 400,
+  401, 403, 422) fail immediately. Total attempts are strictly capped (default: maximum
+  3 attempts).
+- **Backoff and jitter:** Retries apply exponential backoff combined with randomized full
+  jitter to prevent thundering herds against provider APIs.
+- **Header honouring:** Provider-supplied `Retry-After` headers take precedence over
+  default backoff schedules up to a configurable maximum wait ceiling.
+- **Per-provider concurrency caps:** Active simultaneous requests to any single provider
+  are capped in code to stay within confirmed provider rate tiers.
+- **Uncertain-charge accounting:** When a request is dispatched over the network and times
+  out or disconnects before a response is parsed, the preliminary reservation in the
+  budget meter is held in an "uncertain" state rather than released as zero. Uncertain
+  charges count against spending caps until reconciled with provider usage records or
+  manually reviewed, preventing double-spending on retries.
+
+### Pricing configuration and spending controls
+
+The budget meter enforces economic boundaries through deterministic code checks (D-013):
+
+- **Versioned price tables:** Pricing data is stored in versioned tables specifying
+  provider, model ID, effective dates, input token cost, output token cost, and prompt
+  cache pricing tiers.
+- **Missing or stale pricing policy:** If a request targets a model or provider missing
+  from the pricing table, or whose pricing configuration is expired, Bunny enforces a
+  conservative deny or uses an explicit user-approved upper-bound ceiling. A billable
+  request never proceeds under a silent zero-cost assumption.
+- **Soft alerts versus hard caps:**
+  - *Soft warnings:* Non-blocking notifications delivered through the interaction layer
+    when accumulated spending crosses configured warning thresholds (e.g., 80% of daily
+    budget).
+  - *Hard spending caps:* Code-enforced barriers (daily, monthly, and per-request limits).
+    The budget meter rejects pre-dispatch reservations when hard caps are reached,
+    halting execution before any network request is issued.
+
+## Runtime context engineering
+
+The orchestrator and memory service coordinate context assembly to maintain relevance,
+respect model context windows, and optimize API costs:
+
+- **Composition order:** Context is assembled into prompt templates in strict priority
+  layers:
+  1. System preamble and Layer 1 core identity (immutable values, boundaries).
+  2. Layer 2 evolving personality state (style, formality, tone).
+  3. Layer 3 user understanding and scoped memory records (highest relevance first).
+  4. Summarized past conversation context (compressed turns).
+  5. Rolling active conversation turns (recent uncompressed history).
+  6. Current user input, tool outputs, and attachments.
+- **Layer budgets and quotas:** Each prompt layer is assigned a strict maximum token
+  allocation. If context exceeds the target envelope, lower-priority memories and older
+  uncompressed turns are truncated first; Layer 1 boundaries are never truncated.
+- **Selective retrieval:** Memory retrieval is strictly bounded by relevance threshold,
+  category filter, and token count. Explicit facts take precedence over inferred notes.
+- **Summarisation triggers:** When active conversation history reaches a configurable
+  watermark (e.g., 60% of the conversational history budget), Otto schedules a bounded
+  background turn to compress older turns into a durable conversation summary, preserving
+  fidelity while freeing context for immediate turns.
+- **Cache-aware accounting:** The gateway and budget meter track prompt caching
+  mechanisms (such as Anthropic prompt caching, OpenAI cached tokens, or DeepSeek prefix
+  caching). Usage accounting differentiates cached read tokens from uncached input tokens,
+  and cost estimation reflects provider cache discounts.
 
 ## Memory and identity
 
@@ -244,6 +321,22 @@ third-party services, model providers and retrieved internet content all have di
 authority. A local network is not automatically trusted. External content is data, never
 instruction. The security model is elaborated in [PRIVACY.md](PRIVACY.md) and
 [SECURITY.md](../SECURITY.md).
+
+### Network egress and SSRF protection
+
+Tool integrations, MCP servers, and Scout's research functions operate under strict outbound
+network constraints enforced by the permission runtime:
+
+- **Destination validation:** Outbound IP addresses resolved by tools or research agents
+  are checked against a deny-list of private, local, and sensitive network ranges (IPv4
+  127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16; IPv6 `::1`,
+  `fe80::/10`, `fc00::/7`).
+- **Redirect revalidation:** HTTP redirect chains must be validated at every hop; a request
+  that redirects from a public URL to an internal or link-local address is blocked.
+- **DNS rebinding defence:** Resolved IP addresses are pinned for the socket connection to
+  prevent time-of-check to time-of-use (TOCTOU) DNS rebinding attacks.
+- **Payload limits:** Outbound fetch responses are constrained by hard response-size caps
+  and connection timeouts to prevent denial-of-service or memory exhaustion on the host.
 
 ## Open architecture questions
 

@@ -11,11 +11,11 @@ not a demonstration that merely looks complete.
 
 | Milestone | Theme | Primary outcome |
 |---|---|---|
-| **v0.1** | Awakening | A minimal text assistant with a seed personality, persistent local identity, basic memory and one provider. |
-| **v0.2** | Growing personality | Structured personality evolution, memory management, reflection and spending controls. |
-| **v0.3** | Voice and delegation | Wake-word interaction, optional speech processing, and Neon/Otto/Scout delegation with permissions. |
-| **v0.4** | Personal assistant | MCP integration, skills, scheduled tasks, notifications and an optional dashboard. |
-| **v1.0** | Community-ready | Documented installation, cross-platform validation, stable extension interfaces and a security review. |
+| **v0.1** | Awakening | A minimal text assistant with a seed personality, Neon conversation role, persistent local identity, basic memory, minimal budget gate, and one provider. |
+| **v0.2** | Growing personality | Structured personality evolution, memory management, reflection, and hard/soft spending controls. |
+| **v0.3** | Voice and delegation | Wake-word interaction, optional speech processing, Neon/Otto/Scout delegation with permissions, and delegation/tool security gate. |
+| **v0.4** | Personal assistant | MCP integration, skills, scheduled tasks, notifications, optional dashboard, and egress/SSRF security gate. |
+| **v1.0** | Community-ready | Documented installation, cross-platform validation, stable extension interfaces, and final comprehensive security review. |
 
 ## v0.1 - Awakening
 
@@ -26,22 +26,25 @@ Deliverables:
 - Minimal working assistant on the reference hardware.
 - Single-provider configuration with one API key.
 - Seed personality loaded from structured state.
-- Text interaction through a local interface.
+- Text interaction through a local interface powered by the Neon role as the primary conversational voice.
 - Persistent local identity and conversation state.
 - Basic memory retrieval with explicit consent.
 - Natural, non-intrusive curiosity.
 - Restart persistence.
-- Visible usage and estimated cost.
+- Visible usage and estimated cost with versioned pricing configuration.
+- Minimal pre-dispatch reservation check against configurable spending limits (D-013 minimal enforcement).
 - Offline demo or check mode that makes no paid request.
 
 Exit criteria:
 
 - A fresh install can be configured with one key.
+- Conversation runs reliably on the Neon role.
 - The first awakening is natural and can be skipped.
 - Restarting does not repeat the awakening or lose identity.
 - The user can inspect and delete what was remembered.
+- A pre-dispatch budget reservation check prevents billable dispatch if spending limit is exceeded or pricing is missing.
 - No dependency on a GPU, Docker, Redis or a vector database.
-- Tests cover restart, memory consent and provider failure.
+- Tests cover restart, memory consent, budget refusal and provider failure.
 
 ## v0.2 - Growing personality
 
@@ -54,7 +57,7 @@ Deliverables:
 - User controls to inspect, edit, reset and disable evolution.
 - Memory management: browse, correct, delete, export.
 - Background reflection in batches with a manual-only mode.
-- Daily and monthly spending controls with visible records.
+- Daily and monthly spending controls with visible records, soft warning thresholds and hard caps.
 - User-configurable curiosity and quiet hours.
 - Deletion propagation to summaries and retrieval indexes where implemented.
 
@@ -77,6 +80,7 @@ Deliverables:
 - Neon, Otto and Scout as logical agents with a shared provider option.
 - Explicit delegation envelopes, deadlines and cancellation.
 - Tool permissions with user approval for consequential actions.
+- Threat-model and security review gate prior to enabling device control or consequential tool actuation.
 - Budget reservations that cover the final conversational response.
 
 Exit criteria:
@@ -86,6 +90,7 @@ Exit criteria:
 - Workers cannot exceed the permissions or budget of the parent request.
 - A model cannot approve its own tool call.
 - A delegated answer is not presented as Bunny unless the configuration says so.
+- Tool and agent delegations satisfy the v0.3 security review gate.
 
 ## v0.4 - Personal assistant
 
@@ -99,11 +104,14 @@ Deliverables:
 - Notifications through configurable channels.
 - Optional local dashboard.
 - Optional device and smart-home integrations through a permission layer.
+- Security review gate for MCP sandboxing, external skills, and network egress controls.
 
 Exit criteria:
 
 - Scheduled work is bounded, cancellable and budgeted.
 - External content cannot create schedules or grant permissions.
+- Outbound requests from tools, MCP servers, and Scout research satisfy network egress validation and SSRF controls.
+- Integrations pass the v0.4 security review gate.
 - Every integration can be disabled independently.
 - The core assistant still works when optional integrations fail.
 
@@ -152,6 +160,7 @@ acceptance criteria, not completed tests.
 - One provider before many; one agent boundary before delegation.
 - Local storage before optional semantic retrieval.
 - Budget enforcement before any hosted background job.
+- Security and threat-model reviews precede each expansion of agent capability (prior to v0.3 device actions and v0.4 MCP/skills), not deferred until v1.0.
 - Security boundaries before tools that can change the world.
 - Measurements before optimisation claims.
 

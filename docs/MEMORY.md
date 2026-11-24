@@ -127,6 +127,8 @@ Retrieval must be bounded and relevant:
 
 Initially, retrieval can be deterministic: selected facts, category filters and full-text
 search. Semantic retrieval is an optional later enhancement, not a prerequisite.
+Retrieved records must fit within the strict token quota allocated to Layer 3 context
+in the runtime context engineering budget (see [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ## Explicit versus inferred
 
@@ -187,6 +189,8 @@ Reflection may merge duplicates, summarise long histories and flag contradiction
 must:
 
 - Use bounded batches, not continuous calls.
+- Trigger history summarisation when active turns cross the context threshold (e.g. 60%
+  of the conversational history budget per [ARCHITECTURE.md](ARCHITECTURE.md)).
 - Respect budgets and suspension.
 - Never create new permissions or external effects.
 - Keep source references for derived records.

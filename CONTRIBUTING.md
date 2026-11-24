@@ -17,7 +17,7 @@ currently at an early, documentation-led stage.
 
 ## Before opening an issue
 
-1. Search existing issues and discussions to avoid duplicates.
+1. Search existing issues to avoid duplicates (GitHub Discussions is currently disabled during pre-release; use issues for feature proposals and design feedback).
 2. Keep reports focused and reproducible where possible.
 3. Describe the problem, the expected behaviour and the evidence.
 4. Remove credentials, personal memories, private hostnames, IP addresses and device
@@ -84,6 +84,4 @@ the pull request description so reviewers can assess it appropriately.
 
 ## Conduct
 
-Be respectful, specific and constructive. Assume good faith, critique ideas rather than
-people, and make space for contributors with different levels of experience. A formal
-code of conduct may be adopted as the community grows.
+We are committed to providing a welcoming, inclusive and harassment-free environment. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md). Please report unacceptable behaviour privately to `conduct@bunny.ai` or repository maintainers.

@@ -119,6 +119,19 @@ Every billable request, including background work, must be reserved against a bu
 it is sent. Uncertain charges are recorded rather than silently released. A provider
 fallback must never hide a spending or configuration change.
 
+Enforcement schedule and operational rules:
+- **Sequencing:** D-013 takes effect in minimal form in v0.1 (pre-dispatch check against
+  configured limits and versioned pricing), expanded in v0.2 (daily/monthly limits, soft
+  alerts, and reflection budgets), and v0.3 (multi-agent delegation reservations).
+- **Pricing:** Pricing is sourced from versioned tables. Missing or expired pricing fails
+  closed or uses an explicit user-approved upper ceiling; requests never proceed under a
+  silent zero-cost assumption.
+- **Resilience and uncertain charges:** Bounded retries use exponential backoff, jitter,
+  and honour `Retry-After`. If a request times out after dispatch, the reservation remains
+  held as an uncertain charge until reconciled, avoiding double-spending on retries.
+- **Cache-awareness:** Prompt cache read rates are distinguished from uncached tokens in
+  usage metering.
+
 ### D-014 - Curiosity is a subsystem
 
 **Status:** Accepted
@@ -209,8 +222,12 @@ and must be configurable. The project does not optimise for engagement.
 - Voice stack, microphone hardware assumptions and privacy indicators.
 - Extension format for tools, skills and MCP servers.
 - Cross-platform packaging and service supervision.
-- Security review scope and timing.
-- Governance, maintainership and a formal code of conduct.
+- Security review timing: Settled — staged review gates precede v0.3 (tools/delegation),
+  v0.4 (MCP/skills/egress), and v1.0 (final comprehensive audit).
+- Governance and code of conduct: Settled — community Code of Conduct adopted in
+  [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md). Maintainership model remains open.
+- Context engineering fine-tuning: token budget allocations per model class (see
+  [ARCHITECTURE.md](ARCHITECTURE.md)).
 - Whether any optional hosted service is ever appropriate.
 
 ## Changing a decision

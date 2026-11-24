@@ -17,9 +17,10 @@ Use GitHub's private vulnerability reporting for this repository:
 3. Provide a clear description, affected component or document, reproduction steps and
    potential impact.
 
-If private reporting is unavailable, contact the maintainers through the repository's
-listed security contact rather than disclosing details publicly. Please allow reasonable
-time for triage and a coordinated fix before public disclosure.
+If private reporting is unavailable, contact the maintainers at `security@bunny.ai`
+(or via direct maintainer contact listed on the repository profile) rather than
+disclosing details publicly. Please allow reasonable time for triage and a coordinated
+fix before public disclosure.
 
 Do not include real API keys, tokens, private keys, personal memories or private network
 details in a report. Use redacted or synthetic examples.
@@ -62,6 +63,12 @@ The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
   environment variables with restricted file permissions.
 - **No default public listeners.** Local services bind to loopback or an explicitly
   authenticated interface. The local network is not treated as a trusted caller.
+- **Network egress and SSRF controls.** Outbound requests from tools, MCP servers, and
+  web fetchers are strictly validated against private and reserved IP address ranges
+  (loopback, link-local, RFC 1918, and IPv6 unique-local addresses). Redirect targets
+  must be re-validated at every hop, DNS rebinding mitigations applied, and outbound
+  responses subject to strict timeouts and size limits. Tools operate under an explicit
+  egress allowlist policy.
 - **Auditable actions.** Security-relevant events are logged with redacted metadata,
   bounded retention and user-visible controls.
 - **Honest degradation.** When a provider, tool or permission is unavailable, Bunny
@@ -89,6 +96,20 @@ model or a retrieved document.
 Every added dependency should be justified against the reference hardware, licence,
 maintenance status and attack surface. Prefer the standard library and small, auditable
 components where practical. A dependency is not trusted merely because it is popular.
+
+## Security review lifecycle
+
+Security reviews are staged gates tied to capability expansion, not deferred to the end
+of development:
+
+1. **v0.3 Entry Gate:** Threat-model review and security audit of agent delegation,
+   execution boundaries, and local tool/device access controls before enabling any
+   actuation.
+2. **v0.4 Entry Gate:** Threat-model and security audit of MCP client sandboxing,
+   external skills, and network egress/SSRF controls before supporting external
+   integrations.
+3. **v1.0 Release Gate:** Comprehensive end-to-end security audit, dependency review, and
+   threat-model update prior to community release.
 
 ## Disclosure
 

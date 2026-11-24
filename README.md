@@ -85,9 +85,12 @@ See the [roadmap](docs/ROADMAP.md) for proposed milestones and the
 
 ## Architecture at a glance
 
-Bunny is conceived as a small local core surrounded by replaceable adapters. The logical
-agents below do not require separate processes or separate models; a single configured
-provider can serve the whole system where its capabilities allow.
+Bunny is conceived as a small local core surrounded by replaceable adapters. The diagram
+below is a simplified overview; the canonical architecture diagram and component
+specifications are maintained in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+The logical agents below do not require separate processes or separate models; a single
+configured provider can serve the whole system where its capabilities allow.
 
 ```mermaid
 flowchart TB
@@ -135,21 +138,22 @@ flowchart TB
     NEON <--> MEM
     OTTO <--> MEM
     OTTO --> REF
-    SCOUT --> WEB
+    SCOUT --> PERM
     NEON --> GW
     OTTO --> GW
     SCOUT --> GW
+    GW <--> METER
     GW --> CLOUD
     GW -. optional .-> LOCAL
     PERM --> TOOLS
+    PERM --> WEB
     OTTO --> PERM
-    METER --> GW
 ```
 
 The gateway, memory service and permission layer are the important boundaries: no agent
-may bypass the budget meter, and no model output may grant itself new authority. See
-[architecture](docs/ARCHITECTURE.md) for responsibilities, request flow and failure
-behaviour.
+may bypass the budget meter or permission layer, and no model output may grant itself new
+authority. See [architecture](docs/ARCHITECTURE.md) for responsibilities, request flow,
+resilience and failure behaviour.
 
 ## Hardware targets
 
@@ -187,6 +191,7 @@ it. Model and provider choice must never be required to preserve Bunny's identit
 | [Roadmap](docs/ROADMAP.md) | Proposed milestones and acceptance criteria |
 | [Decisions](docs/DECISIONS.md) | Settled decisions and open architectural questions |
 | [Contributing](CONTRIBUTING.md) | How to participate while the project is pre-release |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards and expectations |
 | [Security](SECURITY.md) | Reporting vulnerabilities and the security model |
 
 ## Contributing
