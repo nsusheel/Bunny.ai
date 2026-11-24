@@ -31,11 +31,12 @@ your own device.
 Bunny is designed for:
 
 - **Individuals** who want an intelligent, personal assistant that respects their
-  privacy, avoids recurring platform subscriptions, and cannot be altered or shut down
-  by a remote vendor.
+  privacy, avoids recurring platform subscriptions, and whose identity and memories are
+  designed to survive provider changes rather than being locked to a vendor account (though
+  hosted inference remains dependent on third-party provider availability, pricing, and access).
 - **Tinkerers and developers** who want a modular, hackable foundation that runs on
-  everyday hardware, supports local or hosted models, and enforces strict, deterministic
-  security controls.
+  everyday hardware, supports local or hosted models, and enforces deterministic security
+  and accounting controls.
 
 When development reaches release, users can expect a lightweight assistant that is
 immediately useful via text, learns preferences naturally over time, and operates strictly
@@ -48,7 +49,9 @@ within configured budget and permission limits.
 > *The following scenarios are illustrative hypothetical interactions demonstrating
 > future intended behaviour, not currently implemented software. Bunny is not conscious,
 > sentient or emotionally dependent on its user; it is an attentive software tool designed
-> to be helpful, transparent and respectful of your attention.*
+> to be helpful, transparent and respectful of your attention. All named locations, travel
+> estimates, trail conditions and tide predictions in these examples are fictional illustrative
+> data, not verified real-world information.*
 
 ### Learning your world through natural conversation
 
@@ -95,18 +98,16 @@ user explicitly approved.
 
 ### Founder's note
 
-> Bunny is named after a small stuffed rabbit from my childhood.
+> Bunny is named after a childhood stuffed rabbit associated with comfort, familiarity
+> and continuity.
 >
-> That toy was neither complex nor sophisticated, but it was a constant: a familiar,
-> comforting presence that remained through moves, changing rooms, and the passage of years.
+> In computing, hardware is routinely replaced and operating platforms evolve. With AI,
+> however, user memories and assistant relationships are frequently anchored inside proprietary
+> cloud accounts where continuity can end whenever a vendor alters terms or discontinues a service.
 >
-> In computing, we routinely upgrade hardware, switch operating systems, and replace
-> tools. With AI, however, the industry has asked users to anchor their memories and personal
-> context inside proprietary platforms where continuity can be terminated at any moment.
->
-> Bunny began from a desire to build an assistant with the enduring continuity of that childhood
-> keepsake—a personal companion whose memory and identity remain entirely yours, regardless of
-> which machine it runs on or which intelligence model powers it behind the scenes.
+> Bunny began from the desire to create an assistant with that same enduring continuity: a
+> personal companion whose identity, memories, and configuration belong entirely to the user,
+> persisting across changing machines and interchangeable intelligence models.
 
 Bunny's goal is to bring that sense of reliable, permanent ownership to personal AI: an assistant
 that is curious from day one, grows alongside you, and remains recognisably itself across models,
@@ -119,7 +120,9 @@ Read the complete [Vision statement](docs/VISION.md).
 ## What makes Bunny different
 
 - **Ownership by design.** Identity, memories, configuration, and hardware belong to the
-  user. Moving to another computer or switching model providers never means starting over.
+  user. While hosted inference depends on third-party provider availability and terms, your
+  assistant's identity and memory are designed to persist across provider or hardware changes
+  without starting over.
 - **Provider independence.** One supported API key is sufficient to begin. Users choose
   their preferred intelligence provider; local inference and multi-provider setups are
   optional enhancements, never prerequisites.
@@ -136,8 +139,9 @@ Read the complete [Vision statement](docs/VISION.md).
 - **Modest hardware, no GPU required.** Designed to run on modest, accessible hardware such as
   a Raspberry Pi 4 (4 GB RAM) or repurposed PC. Cloud-hosted models handle heavy inference unless
   local models are explicitly configured.
-- **Deterministic safety and spending controls.** Permissions, tool execution, and budget
-  limits are enforced by deterministic software code, never by easily bypassed prompt instructions.
+- **Deterministic safety and spending controls.** Permissions, tool execution, and
+  pre-dispatch budget reservations are enforced by deterministic software code within Bunny's
+  accounting boundary, never by easily bypassed prompt instructions.
 - **Graceful degradation.** Different language models support different capabilities. Bunny
   adapts its features honestly to match the configured model rather than failing unpredictably.
 - **No mandatory subscription.** There is no required Bunny cloud account, recurring service fee,
@@ -149,26 +153,6 @@ Read the complete [Vision statement](docs/VISION.md).
 
 Bunny presents a single, cohesive assistant identity to the user. Internally, responsibilities
 are divided among three planned **logical agent roles**:
-
-```text
-               +-------------------------------------------------+
-               |                    BUNNY                        |
-               |         (Unified Assistant Identity)            |
-               +-------------------------------------------------+
-                                       |
-         +-----------------------------+-----------------------------+
-         |                             |                             |
-         v                             v                             v
-+------------------+          +------------------+          +------------------+
-|      NEON        |          |       OTTO       |          |      SCOUT       |
-| Primary Dialogue |          | Routine & Memory |          | Research & Web   |
-+------------------+          +------------------+          +------------------+
-| - Conversational |          | - Background     |          | - Deep research  |
-|   personality    |          |   reflection     |          | - Source finding |
-| - User requests  |          | - Memory hygiene |          | - Web discovery  |
-| - Task routing   |          | - Scheduled jobs |          | - Synthesis      |
-+------------------+          +------------------+          +------------------+
-```
 
 - **Neon (Primary conversation and interaction):**
   Neon is the conversational voice and direct interface of Bunny. When you talk to Bunny,
@@ -291,9 +275,11 @@ Understanding what Bunny costs to run is essential:
   charge for tokens processed by their APIs. Usage is paid directly to the provider you choose.
 - **One key is enough:** You do not need multiple subscriptions or expensive setups. A single
   supported API key powers the entire experience.
-- **Pre-dispatch budget safety:** Bunny treats spending limits as hard constraints. Every billable
-  request reserves budget before dispatch against configured daily or monthly limits. Bunny stops
-  and alerts you before exceeding your chosen budget.
+- **Pre-dispatch budget reservations:** Within Bunny's accounting boundary, billable requests
+  reserve estimated costs before dispatch against configured daily or monthly limits. Bunny stops
+  and alerts you before dispatching if limits are reached or pricing is missing. However, this is
+  not an external financial guarantee: network timeouts can leave in-flight requests as uncertain
+  charges, provider pricing may change out-of-band, and usage outside Bunny's gateway cannot be metered.
 - **Local inference costs:** While running a local model incurs no per-token API fees, it still
   requires compatible hardware, system RAM, and electrical power.
 
@@ -391,6 +377,7 @@ Bunny.ai documentation and software designs are licensed under the
 ## Provenance
 
 This repository is the public home of Bunny.ai. An earlier private prototype informed some of the
-conceptual design, but no prototype source code or personal configuration has been imported.
-All design documents in this repository are written from scratch for the open-source community
-and contain no personal, proprietary, or credential data.
+conceptual design, but no prototype source code has been imported. Aside from the high-level origin
+shared in the founder's note, this repository contains no personal data: no private user memories,
+personal configurations, credentials, or proprietary infrastructure details have been included.
+All design documents are written from scratch for the open-source community.
