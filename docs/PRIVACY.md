@@ -19,6 +19,49 @@ Bunny must never describe cloud inference as private merely because its memory i
 
 ## Data flows
 
+```mermaid
+flowchart TB
+    accTitle: Data crossing Bunny's trust boundaries
+    accDescr: Bunny selects permitted context from local state. Hosted model requests need a budget reservation. Model output and tool results are untrusted. A proposed tool action needs permission, any required user approval, and a reservation if billable.
+    User([User])
+    subgraph Local["User-controlled environment"]
+        State[("Local identity and memory")]
+        Sel["Select permitted context"]
+        Meter{"Budget reserved?"}
+        Gate{"Tool allowed?"}
+        State -->|"Relevant records"| Sel
+        Sel -->|"Model gateway"| Meter
+    end
+    subgraph External["External trust boundary"]
+        Hosted["Hosted model"]
+        Tools["External tools and<br/>research sources"]
+    end
+    User -->|"Context sharing choice"| Sel
+    User -->|"Approval when required"| Gate
+    Meter <-->|"Selected context out<br/>Untrusted output in"| Hosted
+    Gate <-->|"Approved request out<br/>Reserve if billable<br/>Untrusted result in"| Tools
+    style Local fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    style External fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+
+    classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
+    classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
+    classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
+    classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
+    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
+    class State state
+    class Sel core
+    class Meter,Gate gate
+    class Hosted model
+    class User,Tools neutral
+```
+
+This view follows hosted inference and external tool or research traffic. The arrows show
+admission conditions and the data crossing each boundary. Treat model output and retrieved
+content as untrusted data. If either leads to a proposed action, the permission runtime checks
+scope, egress and any required user approval before execution. Billable tool actions require the same
+pre-dispatch accounting boundary as hosted inference. Local inference and optional audio
+are described separately.
+
 | Data | Where it lives | May leave the device | Control |
 |---|---|---|---|
 | API keys and tokens | Secure secret storage or environment | Only to the selected provider as authentication | User-managed; never stored as memory |

@@ -10,14 +10,32 @@ inspectable, portable and reversible.
 
 ```mermaid
 flowchart TB
-    L1["Layer 1 - Core identity\nStable values and boundaries\nNot autonomously rewritten"]
-    L2["Layer 2 - Evolving personality\nStyle, humour, formality, initiative\nInspectable and reversible"]
-    L3["Layer 3 - User understanding\nPreferences, projects, routines, goals\nExplicit and inferred, with provenance"]
+    accTitle: Portable local identity and memory
+    accDescr: Stable core identity, evolving personality and knowledge about the user form separate local layers. Users can inspect and correct state. A policy check controls proposed style changes. Relevant state is retrieved for the configured model and can be exported and imported on another device.
+    User([User])
+    subgraph Local["Local persistent state"]
+        Core["1 · Stable core identity<br/>Versioned values and boundaries"]
+        Style["2 · Evolving personality<br/>Style and interaction preferences"]
+        Knowledge["3 · User understanding<br/>Memories with provenance"]
+    end
+    Proposal["Proposed style change"] --> Policy{"Personality policy permits?"}
+    Policy -->|"Apply and record"| Style
+    User <-->|"Inspect and edit / reset"| Style
+    User <-->|"Inspect and correct"| Knowledge
+    Local -->|"Retrieve scoped context"| Context["Context for configured model"]
+    Local -->|"Export / import"| Move["State on another device"]
 
-    L1 --> L2
-    L1 --> L3
-    L2 --> BEHAVIOUR["Behaviour"]
-    L3 --> BEHAVIOUR
+    classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
+    classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
+    classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
+    classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
+    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
+    class Proposal core
+    style Local fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    class Core,Style,Knowledge,Move state
+    class Context model
+    class Policy gate
+    class User neutral
 ```
 
 Keep the layers separate. A change to conversational style must not change safety

@@ -25,65 +25,63 @@ boundaries.
 
 ```mermaid
 flowchart TB
-    subgraph Interaction
-        CLI["CLI / text"]
-        DASH["Dashboard (optional)"]
-        VOICE["Voice pipeline (optional)"]
+    accTitle: Proposed Bunny component architecture
+    accDescr: On the user-controlled host, interaction adapters reach the orchestrator and logical roles. Local services hold context and schedule reflection. Hosted inference needs a budget reservation. External tools and research need permission checks and a reservation when billable.
+    subgraph Local["User-controlled environment"]
+        UI["Text / CLI · optional voice and dashboard"]
+        ORCH["Orchestrator · deterministic routing"]
+        Roles["Logical roles · model-assisted<br/>Neon · Otto · Scout"]
+        subgraph Context["Local state and behaviour"]
+            direction TB
+            Identity["Identity and personality"]
+            Memory["Memory service"]
+            Store[("Database and files<br/>SQLite provisional")]
+            Curiosity["Curiosity engine"]
+            Reflection["Reflection scheduler"]
+            Identity ~~~ Memory
+            Memory <-->|"Read / write"| Store
+            Curiosity ~~~ Reflection
+        end
+        Gateway["Model gateway<br/>Provider and capability selection"]
+        Budget{"Budget reserved?"}
+        Perm{"Tool allowed?"}
+        LocalModel["Optional local inference"]
+        UI --> ORCH --> Roles
+        Roles <-->|"Scoped local services"| Context
+        Roles --> Gateway
+        Roles -->|"Permissions and tool runtime"| Perm
+        Gateway -->|"Usage and budget meter"| Budget
+        Gateway -.->|"Non-billable route"| LocalModel
     end
-
-    subgraph Core
-        ORCH["Orchestrator"]
-        ID["Identity and personality state"]
-        CUR["Curiosity engine"]
-        MEM["Memory service"]
-        REF["Reflection scheduler"]
-        PERM["Permissions and tool runtime"]
-        METER["Usage and budget meter"]
-        GW["Model gateway"]
+    subgraph Outside["External trust boundary"]
+        Hosted["Hosted inference"]
+        Tools["Tools · MCP · devices<br/>Web and research sources"]
     end
+    Budget -->|"Admit hosted call via gateway"| Hosted
+    Perm -->|"Approved scope and egress<br/>Reserve if billable"| Tools
 
-    subgraph LogicalAgents["Logical agents"]
-        NEON["Neon - conversation and delegation"]
-        OTTO["Otto - routine operations and reflection"]
-        SCOUT["Scout - research and synthesis"]
-    end
-
-    subgraph Storage
-        DB["SQLite: conversations, memories, usage"]
-        BLOB["Files: exports, audio, backups"]
-    end
-
-    subgraph External
-        CLOUD["Hosted providers"]
-        LOCALLLM["Local inference (optional)"]
-        TOOLS["Tools, MCP, devices"]
-        WEB["Web and public sources"]
-    end
-
-    CLI --> ORCH
-    DASH --> ORCH
-    VOICE --> ORCH
-    ORCH --> NEON
-    ORCH --> OTTO
-    ORCH --> SCOUT
-    NEON <--> ID
-    NEON <--> CUR
-    NEON <--> MEM
-    OTTO <--> MEM
-    OTTO --> REF
-    SCOUT --> PERM
-    NEON --> GW
-    OTTO --> GW
-    SCOUT --> GW
-    GW <--> METER
-    GW --> CLOUD
-    GW -. optional .-> LOCALLLM
-    OTTO --> PERM
-    PERM --> TOOLS
-    PERM --> WEB
-    MEM <--> DB
-    MEM <--> BLOB
+    classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
+    classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
+    classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
+    classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
+    classDef neutral fill:#eef1f5,stroke:#67768a,color:#222d3d
+    style Local fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    style Outside fill:transparent,stroke:#8090a4,stroke-dasharray:5 3
+    style Context fill:transparent,stroke:#8090a4
+    class ORCH,Roles,Curiosity,Reflection core
+    class Identity,Memory,Store state
+    class Gateway,Hosted,LocalModel model
+    class Budget,Perm gate
+    class UI,Tools neutral
 ```
+
+Arrows show dependencies and admission conditions. The gateway dispatches the provider
+request after approval from the meter. The local inference route still requires a
+reservation if billable. Tool traffic goes through the permission runtime and all billable
+attempts use the same accounting boundary. Neon uses identity, curiosity and memory. Otto
+uses memory and coordinates reflection. The integration wiring for billable non-model
+actions is unspecified. Configurations with an optional accelerator still have a distinct
+accelerator trust boundary.
 
 No agent or subsystem may bypass the permission layer to access tools, devices, or the
 external web; similarly, no agent may dispatch billable inference without reserving against
@@ -106,34 +104,52 @@ the budget meter.
 
 ## Request lifecycle
 
+The example follows a billable text turn. It leaves streaming timing and the relative
+ordering of response delivery, history persistence and optional consolidation unspecified.
+
 ```mermaid
 sequenceDiagram
+    accTitle: A billable text turn with refusal and timeout paths
+    accDescr: Bunny retrieves scoped context and checks budget before sending a provider request. A refused reservation stops dispatch. Bunny reconciles reported usage and holds uncertain charges. Any later memory updates follow policy.
     participant U as User
-    participant O as Orchestrator
+    participant O as Bunny core
     participant M as Memory
-    participant A as Agent
     participant G as Gateway
-    participant B as Budget meter
+    participant B as Budget
     participant P as Provider
-    participant S as Storage
 
-    U->>O: Message or command
-    O->>O: Resolve identity, intent and permissions
-    O->>M: Retrieve only relevant, permitted context
-    M-->>O: Bounded memories and provenance
-    O->>A: Invoke logical agent with scoped context
-    A->>G: Request generation or tool plan
-    G->>B: Reserve maximum possible cost
-    B-->>G: Reservation or refusal
-    G->>P: Bounded, stateless request
-    P-->>G: Stream or final response with usage
-    G->>B: Settle actual or record uncertainty
-    G-->>A: Normalised result
-    A-->>O: Proposed response or tool request
-    O->>O: Apply approval policy for any effect
-    O-->>U: Present result with honest status
-    O->>S: Persist completed turn and usage
+    U->>O: Submit text
+    O->>M: Retrieve permitted context
+    M-->>O: Context with provenance
+    O->>G: Bounded request via Neon
+    G->>G: Select model and capabilities
+    G->>B: Reserve upper-bound cost
+    alt Reservation refused
+        B-->>G: Refuse
+        G-->>O: Report refusal
+        O-->>U: Explain why no call was made
+    else Reservation granted
+        B-->>G: Grant reservation
+        G->>P: Dispatch request
+        alt Response received
+            P-->>G: Output and usage where available
+            G->>B: Reconcile or hold charge
+            G-->>O: Normalise output for Neon
+            O-->>U: Present honest result
+            opt Later consolidation permitted
+                O->>M: Check proposed memory update
+            end
+        else Dispatched call times out or disconnects
+            G->>B: Hold uncertain charge
+            G-->>O: Report failure
+            O-->>U: Explain failure and uncertainty
+        end
+    end
 ```
+
+If output proposes a tool action, the [permission rules](../SECURITY.md) apply before any
+effect. A completed turn can be persisted subject to retention settings. Durable memory
+has its own [consent and policy checks](MEMORY.md#lifecycle).
 
 Key rules:
 
@@ -147,6 +163,36 @@ Key rules:
 
 The agents are logical roles, not necessarily separate processes, models or provider
 accounts. A single configured model can serve all three where its capabilities permit.
+
+```mermaid
+flowchart TB
+    accTitle: One Bunny identity and three logical roles
+    accDescr: Neon is the user-facing conversation role. Otto handles operations, memory organisation and reflection. Scout researches. Neon and Otto use shared memory. The roles use a model gateway with a budget gate, and a permission gate for tool actions.
+    Bunny["Bunny · one assistant identity"]
+    Neon["Neon<br/>Conversation"]
+    Otto["Otto<br/>Operations, memory<br/>and reflection"]
+    Scout["Scout<br/>Research"]
+    Shared[("Shared memory")]
+    Gateway["Shared model gateway"]
+    Budget{"Budget reservation<br/>for billable calls"}
+    Permissions{"Permission checks<br/>for tool actions"}
+
+    Bunny <-->|"User-facing voice"| Neon
+    Bunny -.->|"Internal roles"| Otto & Scout
+    Neon & Otto <-->|"Scoped context"| Shared
+    Neon & Otto & Scout --> Gateway
+    Gateway --> Budget
+    Otto & Scout --> Permissions
+
+    classDef core fill:#ede9fe,stroke:#7554ba,color:#241341
+    classDef state fill:#d9f5ef,stroke:#268171,color:#103a34
+    classDef model fill:#e0efff,stroke:#3975b6,color:#142e52
+    classDef gate fill:#fff0cf,stroke:#9d701d,color:#462d0a
+    class Bunny,Neon,Otto,Scout core
+    class Shared state
+    class Gateway model
+    class Budget,Permissions gate
+```
 
 | Agent | Role | Typical tools | Default posture |
 |---|---|---|---|
@@ -337,6 +383,25 @@ network constraints enforced by the permission runtime:
   prevent time-of-check to time-of-use (TOCTOU) DNS rebinding attacks.
 - **Payload limits:** Outbound fetch responses are constrained by hard response-size caps
   and connection timeouts to prevent denial-of-service or memory exhaustion on the host.
+
+## Diagram conventions
+
+Each view answers a different question: the [README](../README.md) introduces the product,
+the component map shows service boundaries, and the role and sequence views show
+responsibilities and request behaviour. [Personality](PERSONALITY.md#three-layers) and
+[privacy](PRIVACY.md#data-flows) show state and data handling in more detail.
+
+- **Violet** marks Bunny and its roles or core behaviour. **Teal** marks local state.
+  **Blue** marks model access or inference. **Amber** marks a policy or budget decision.
+  **Neutral** marks actors, interfaces and other endpoints.
+- Rounded endpoints represent the user, cylinders represent storage or shared state, and
+  diamonds represent checks enforced by software. Groups name trust boundaries.
+- Label data, dependencies and admission conditions on connections. Use dashed flowchart
+  arrows for optional paths or logical groupings, labelled by purpose. Sequence diagrams
+  use solid messages for requests and dashed messages for returns.
+- Use native Mermaid fences, short labels, textual alternatives and explicit foreground
+  colours with pale fills. Keep trust-boundary backgrounds and lines theme-aware. Check
+  both themes at desktop and narrow widths after changing a diagram.
 
 ## Open architecture questions
 
