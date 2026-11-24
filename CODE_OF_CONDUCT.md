@@ -24,6 +24,6 @@ We as contributors and maintainers of Bunny.ai pledge to make participation in o
 
 Project maintainers are responsible for clarifying and enforcing our standards of acceptable behaviour and will take appropriate, fair corrective action in response to any behaviour that they deem inappropriate, threatening, or offensive.
 
-Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported by contacting the maintainers at `conduct@bunny.ai` (or via private maintainer contact listed on the repository profile). All reports will be reviewed promptly and handled with confidentiality.
+Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported by contacting the maintainers directly through the contact channel listed on the repository owner's profile. Dedicated project conduct reporting infrastructure is pending owner setup prior to public release. All reports will be reviewed promptly and handled with confidentiality.
 
 Maintainers who do not follow or enforce the Code of Conduct in good faith may face temporary or permanent repercussions as determined by project leadership.

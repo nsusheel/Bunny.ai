@@ -84,4 +84,4 @@ the pull request description so reviewers can assess it appropriately.
 
 ## Conduct
 
-We are committed to providing a welcoming, inclusive and harassment-free environment. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md). Please report unacceptable behaviour privately to `conduct@bunny.ai` or repository maintainers.
+We are committed to providing a welcoming, inclusive and harassment-free environment. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md). Please report unacceptable behaviour privately to repository maintainers through the contact channel listed on the repository owner's profile.

@@ -17,10 +17,10 @@ Use GitHub's private vulnerability reporting for this repository:
 3. Provide a clear description, affected component or document, reproduction steps and
    potential impact.
 
-If private reporting is unavailable, contact the maintainers at `security@bunny.ai`
-(or via direct maintainer contact listed on the repository profile) rather than
-disclosing details publicly. Please allow reasonable time for triage and a coordinated
-fix before public disclosure.
+If private reporting is unavailable, contact the maintainers directly through the
+contact channel listed on the repository owner's profile. Dedicated project security
+inboxes are pending owner setup prior to public release. Please allow reasonable time
+for triage and a coordinated fix before public disclosure.
 
 Do not include real API keys, tokens, private keys, personal memories or private network
 details in a report. Use redacted or synthetic examples.
