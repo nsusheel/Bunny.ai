@@ -107,29 +107,31 @@ user explicitly approved.
 </details>
 
 <details>
-<summary>Founder’s note and project origin</summary>
+<summary>Why I'm building Bunny</summary>
 
-> Bunny is named after a childhood stuffed rabbit associated with comfort, familiarity
-> and continuity.
->
-> In computing, hardware is routinely replaced and operating platforms evolve. With AI,
-> however, user memories and assistant relationships are frequently anchored inside proprietary
-> cloud accounts where continuity can end whenever a vendor alters terms or discontinues a service.
->
-> Bunny began from the desire to create an assistant with that same enduring continuity: a
-> personal companion whose identity, memories, and configuration belong entirely to the user,
-> persisting across changing machines and interchangeable intelligence models.
+### A note from the founder
 
-Bunny's goal is to bring that sense of reliable, permanent ownership to personal AI: an assistant
-that is curious from day one, grows alongside you, and remains recognisably itself across models,
-providers, and machines.
+I use AI almost every day, whether it's for work, learning, building something new, or simply exploring an idea.
+
+But something has always bothered me. Every time I switch models, platforms or providers, I feel like I'm starting over. The intelligence might get better, but the familiarity doesn't necessarily come with it.
+
+That got me thinking: why should the intelligence behind a personal AI and the things that make it personal be inseparable?
+
+I wanted to build something that I could run on my own hardware, experiment with freely, and improve over time. Something that could use whichever model made sense for me without losing everything it had learned along the way.
+
+That's where Bunny comes in.
+
+I'm building Bunny because I want something like this for myself. Making it open source means others can experiment with it, challenge my decisions and help shape what it eventually becomes.
+
+It's an ambitious experiment, and there's a lot I haven't figured out yet. But that's part of the fun.
+
+— Susheel, Creator of Bunny.ai
 
 Read the complete [Vision statement](docs/VISION.md).
 
 This repository is the public home of Bunny.ai. An earlier private prototype informed some of the
-conceptual design, but no prototype source code has been imported. Aside from the high-level origin
-shared in the founder's note, this repository contains no personal data: no private user memories,
-personal configurations, credentials, or proprietary infrastructure details have been included.
+conceptual design, but no prototype source code has been imported. The repository excludes
+private user memories, personal configurations, credentials and proprietary infrastructure details.
 All design documents are written from scratch for the open-source community.
 
 </details>
