@@ -8,7 +8,7 @@ Bunny.ai is an open-source, hardware-independent, provider-agnostic personal ass
 
 ## Current state
 
-- Branch `docs/project-foundation` at `cda891e` (2 commits): vision plus foundational architecture documents, every one status-labelled as proposed design.
+- Branch `main` at `28a3bc6` (PR #1 merged): vision plus foundational architecture documents, every one status-labelled as proposed design. Feature branch `docs/readme-public-onboarding` improves public onboarding and README storytelling.
 - Documents: README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, LICENSE, and docs/{VISION, ARCHITECTURE, AWAKENING, PERSONALITY, MEMORY, PRIVACY, ROADMAP, DECISIONS, REVIEW-2026-11-24}. All relative links resolve.
 - Decision log D-001..D-022: accepted core (licence, documentation-first, no private-prototype import, gateway, local-first memory, deterministic security, budget-before-dispatch); provisional SQLite (D-007) and Pi 4 reference target (D-015); stack, voice, packaging, encryption open. Staged security review gates and community Code of Conduct adopted.
 - All 13 findings from the independent review (MiMo V2.6 Flash, 2026-11-24) recorded in docs/REVIEW-2026-11-24.md are resolved.
