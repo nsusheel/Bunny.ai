@@ -1,9 +1,7 @@
 # ---------------------------------------------------------------------------
 # Bunny.ai - ignored files
 #
-# This is intentionally stack-neutral. The final implementation language is an
-# open decision. Language-specific entries appear only in the provisional
-# Python section at the end, because Python is the current prototype baseline.
+# Keep credentials, local project artifacts and Python build output out of Git.
 # ---------------------------------------------------------------------------
 
 # Secrets, credentials and keys
@@ -80,8 +78,7 @@ desktop.ini
 .vscode/
 
 # ---------------------------------------------------------------------------
-# Provisional Python tooling (current recommended prototype baseline)
-# Remove this section if the implementation stack changes.
+# Python and uv tooling
 # ---------------------------------------------------------------------------
 .venv/
 venv/
@@ -90,6 +87,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
+.uv-python/
 *.egg-info/
 build/
 dist/
+
+# Local planning draft
+/docs/AWAKENING-IMPLEMENTATION-PROPOSAL.md

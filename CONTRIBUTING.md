@@ -3,8 +3,28 @@
 Thank you for considering a contribution. Bunny is an ambitious project, and it is
 currently at an early, documentation-led stage.
 
-> **Status:** there is no supported implementation in this repository yet. Please do not
-> assume that installation, packaging or runtime interfaces are stable.
+> **Status:** the experimental offline scaffold is available. Installation, packaging
+> and runtime interfaces may change as Awakening develops.
+
+## Development setup
+
+Use [uv](https://docs.astral.sh/uv/getting-started/installation/) 0.13.8 and run these
+commands from the checkout. Python 3.12 is the baseline. Use `--python 3.13` to check
+compatibility in a separate environment or let uv recreate the project environment.
+
+```sh
+uv sync --locked --python 3.12
+uv run --no-sync ruff format --check .
+uv run --no-sync ruff check .
+uv run --no-sync mypy
+uv run --no-sync pytest
+uv build --offline
+uv run --no-sync python scripts/smoke_wheel.py
+```
+
+The build emits a wheel and source distribution in `dist/`. The smoke script expects
+one Bunny.ai wheel there. It installs the wheel into a temporary environment without an
+index and runs the installed entry point with Python networking blocked.
 
 ## Ways to contribute
 

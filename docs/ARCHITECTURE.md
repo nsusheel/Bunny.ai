@@ -394,7 +394,7 @@ responsibilities and request behaviour. [Personality](PERSONALITY.md#three-layer
 
 ## Open architecture questions
 
-Technology stack, storage engine details, gateway interface shape, personality schema,
-voice stack, event bus and packaging approach remain open. See
-[DECISIONS.md](DECISIONS.md) for their current status and the evidence required to settle
-them.
+Python, direct SQLite and scaffold packaging are approved for Awakening. Storage schema
+details, gateway interface shape, hosted provider selection, request-specific budget bounds,
+personality schema, voice stack, event bus and end-user distribution remain open. See
+[DECISIONS.md](DECISIONS.md) for their current status.

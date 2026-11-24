@@ -2,7 +2,7 @@
 
 **An open-source personal AI that grows with you.**
 
-> **Pre-release · Documentation only.** There is no runnable Bunny to install today. The diagrams and capabilities on this page describe the proposed design.
+> **Pre-release · Experimental scaffold.** The installable CLI runs a simulated offline demo. Awakening is in development, and the diagrams on this page describe the proposed design.
 
 Bunny is a personal assistant designed to run on hardware you control. Its identity, memories and settings live on your device. You can change the AI model or move to another machine and carry that state with you.
 
@@ -26,7 +26,20 @@ Bunny is a personal assistant designed to run on hardware you control. Its ident
 
 ## Where development stands
 
-The documentation foundation is complete. **Next is v0.1 Awakening**, a minimal text assistant with one provider, a seed personality, restart-persistent local memory and a pre-dispatch budget check.
+**v0.1 Awakening** starts with the offline engineering scaffold. The milestone will add text conversation through one provider, a seed personality, restart-persistent local memory and a pre-dispatch budget check.
+
+### Try the offline demo
+
+From this checkout, with [uv](https://docs.astral.sh/uv/getting-started/installation/) 0.13.8:
+
+```sh
+uv sync --locked --python 3.12
+uv run --no-sync bunny --help
+uv run --no-sync bunny --version
+uv run --no-sync bunny demo "Hello Bunny"
+```
+
+The demo reports a character count and exits. It needs no API key, sends no network requests and saves no conversation. The initial setup may download Python and development tools. See [contributor setup](CONTRIBUTING.md#development-setup) for validation commands.
 
 ```mermaid
 ---
