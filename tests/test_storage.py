@@ -1,6 +1,8 @@
 import hashlib
 import os
 import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,13 +17,16 @@ from bunny_ai.config import (
 )
 from bunny_ai.errors import (
     CorruptDatabaseError,
+    DatabaseLockedError,
     IncompatibleSchemaError,
     MigrationError,
     MissingIdentityError,
     NewerSchemaError,
+    RecoveryRequiredError,
+    StorageError,
 )
 from bunny_ai.migrations import CURRENT_SCHEMA_VERSION, m001_identity
-from bunny_ai.storage import DB_FILENAME, LocalStorage
+from bunny_ai.storage import DB_FILENAME, INIT_STAGING_PREFIX, LocalStorage
 
 
 def _sha256(path: Path) -> str:
@@ -476,3 +481,203 @@ def test_prune_expired_history_preserves_open_session_and_cleans_ended_empty_ses
         assert turns == [(open_session_id, 2, "next turn in open session")]
     finally:
         conn.close()
+
+
+def _create_hot_journal_crash(db_path: Path, *, statements: list[str]) -> Path:
+    import json
+
+    script = (
+        "import json, os, sqlite3, sys\n"
+        "conn = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "conn.execute('PRAGMA journal_mode = DELETE')\n"
+        "conn.execute('PRAGMA synchronous = FULL')\n"
+        "conn.execute('PRAGMA cache_size = 1')\n"
+        "conn.execute('BEGIN IMMEDIATE')\n"
+        "for stmt in json.loads(sys.stdin.read()):\n"
+        "    conn.execute(stmt)\n"
+        "os._exit(1)\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script, str(db_path)],
+        input=json.dumps(statements),
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    journal_path = db_path.parent / f"{db_path.name}-journal"
+    assert journal_path.is_file() and journal_path.stat().st_size > 0
+    return journal_path
+
+
+def test_interrupted_first_init_is_retryable_and_preserves_unrelated_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "retry-init"
+
+    from bunny_ai.migrations import MIGRATIONS, Migration
+
+    def _interrupt(_conn: sqlite3.Connection) -> None:
+        raise RuntimeError("interrupted mid-init")
+
+    broken = tuple(
+        migration
+        if migration.version == 1
+        else Migration(
+            version=migration.version,
+            description=migration.description,
+            apply=_interrupt,
+        )
+        for migration in MIGRATIONS
+    )
+    monkeypatch.setattr("bunny_ai.storage.MIGRATIONS", broken)
+
+    storage = LocalStorage(data_dir)
+    with pytest.raises(StorageError, match="interrupted mid-init"):
+        storage.initialize_or_load(seed_version="seed-1", style_version="style-1")
+    storage.close()
+    assert not storage.db_path.exists()
+    assert list(data_dir.glob(f"{INIT_STAGING_PREFIX}*")) == []
+
+    monkeypatch.undo()
+
+    # Simulate stale staging files left behind by a hard-killed first launch.
+    stale_db = data_dir / f"{INIT_STAGING_PREFIX}deadbeef.tmp"
+    stale_journal = data_dir / f"{INIT_STAGING_PREFIX}deadbeef.tmp-journal"
+    stale_db.write_bytes(b"partial")
+    stale_journal.write_bytes(b"partial-journal")
+
+    assert LocalStorage(data_dir).inspect().exists is False
+
+    retried = LocalStorage(data_dir)
+    init = retried.initialize_or_load(seed_version="seed-1", style_version="style-1")
+    retried.close()
+    assert init.is_first_launch is True
+    assert list(data_dir.glob(f"{INIT_STAGING_PREFIX}*")) == []
+
+    # Pre-existing empty or damaged files remain untouched.
+    for name, payload in (("empty", b""), ("damaged", b"not sqlite")):
+        unrelated_dir = tmp_path / f"unrelated-{name}"
+        unrelated_dir.mkdir()
+        unrelated_db = unrelated_dir / DB_FILENAME
+        unrelated_db.write_bytes(payload)
+        digest = _sha256(unrelated_db)
+        with pytest.raises(CorruptDatabaseError):
+            LocalStorage(unrelated_dir).initialize_or_load(
+                seed_version="seed-1", style_version="style-1"
+            )
+        assert _sha256(unrelated_db) == digest
+
+
+def test_hot_journal_recovery_in_storage_and_refusal_preservation(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "hot-journal"
+    storage = LocalStorage(data_dir)
+    init = storage.initialize_or_load(seed_version="seed-1", style_version="style-1")
+    identity_id = init.identity.identity_id
+    sid = storage.start_history_session(identity_id)
+    storage.record_turn(
+        session_id=sid,
+        turn_index=1,
+        user_text="committed turn",
+        assistant_text="committed reply",
+        provider_mode="offline-simulated",
+    )
+    storage.end_history_session(sid)
+    storage.close()
+
+    crash_statements = [
+        (
+            f"INSERT INTO sessions VALUES ('crash-sess', '{identity_id}', "
+            "'2026-11-25T00:00:00Z', NULL, 1)"
+        ),
+        *[
+            (
+                f"INSERT INTO turns VALUES ('crash-turn-{idx}', 'crash-sess', {idx}, "
+                f"'{('x' * 8192)}', 'crash reply', 'offline-simulated', '2026-11-25T00:00:00Z')"
+            )
+            for idx in range(1, 10)
+        ],
+    ]
+    journal_path = _create_hot_journal_crash(
+        storage.db_path, statements=crash_statements
+    )
+    db_digest = _sha256(storage.db_path)
+    journal_digest = _sha256(journal_path)
+
+    with pytest.raises(RecoveryRequiredError, match="bunny chat"):
+        LocalStorage(data_dir).inspect()
+    assert _sha256(storage.db_path) == db_digest
+    assert _sha256(journal_path) == journal_digest
+
+    recovered = LocalStorage(data_dir)
+    resumed = recovered.initialize_or_load(
+        seed_version="seed-1", style_version="style-1"
+    )
+    turns = recovered.load_recent_turns(identity_id, limit=10, retention_days=30)
+    recovered.close()
+    assert resumed.identity.identity_id == identity_id
+    assert [t.user_text for t in turns] == ["committed turn"]
+    assert not journal_path.exists()
+
+    # Newer-schema DB with a hot journal must still refuse and preserve both files.
+    newer_dir = tmp_path / "newer-hot"
+    newer_storage = LocalStorage(newer_dir)
+    newer_init = newer_storage.initialize_or_load(
+        seed_version="seed-1", style_version="style-1"
+    )
+    newer_storage.close()
+    conn = sqlite3.connect(str(newer_storage.db_path))
+    conn.execute("PRAGMA user_version = 99")
+    conn.commit()
+    conn.close()
+    newer_crash_statements = [
+        (
+            f"INSERT INTO sessions VALUES ('crash-sess', '{newer_init.identity.identity_id}', "
+            "'2026-11-25T00:00:00Z', NULL, 1)"
+        ),
+        *[
+            (
+                f"INSERT INTO turns VALUES ('crash-turn-{idx}', 'crash-sess', {idx}, "
+                f"'{('y' * 8192)}', 'reply', 'offline-simulated', '2026-11-25T00:00:00Z')"
+            )
+            for idx in range(1, 10)
+        ],
+    ]
+    newer_journal = _create_hot_journal_crash(
+        newer_storage.db_path, statements=newer_crash_statements
+    )
+    newer_db_digest = _sha256(newer_storage.db_path)
+    newer_journal_digest = _sha256(newer_journal)
+
+    with pytest.raises(NewerSchemaError):
+        LocalStorage(newer_dir).initialize_or_load(
+            seed_version="seed-1", style_version="style-1"
+        )
+    assert _sha256(newer_storage.db_path) == newer_db_digest
+    assert _sha256(newer_journal) == newer_journal_digest
+
+
+def test_lock_contention_raises_database_locked_error(tmp_path: Path) -> None:
+    data_dir = tmp_path / "locked"
+    storage = LocalStorage(data_dir)
+    init = storage.initialize_or_load(seed_version="seed-1", style_version="style-1")
+    storage.close()
+
+    holder = sqlite3.connect(str(storage.db_path), isolation_level=None)
+    try:
+        holder.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(DatabaseLockedError):
+            LocalStorage(data_dir, busy_timeout_ms=150).inspect()
+        with pytest.raises(DatabaseLockedError):
+            LocalStorage(data_dir, busy_timeout_ms=150).initialize_or_load(
+                seed_version="seed-1", style_version="style-1"
+            )
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    after = LocalStorage(data_dir)
+    loaded = after.initialize_or_load(seed_version="seed-1", style_version="style-1")
+    after.close()
+    assert loaded.identity.identity_id == init.identity.identity_id

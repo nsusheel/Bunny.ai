@@ -591,3 +591,273 @@ def test_retention_pruning_cli_no_history_startup_and_readonly_status(
         conn.close()
 
     assert _sha256(backups[0]) == backup_digest
+
+
+def _spawn_hot_journal_crash(db_path: Path, *, statements: list[str]) -> Path:
+    import json
+
+    script = (
+        "import json, os, sqlite3, sys\n"
+        "conn = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "conn.execute('PRAGMA journal_mode = DELETE')\n"
+        "conn.execute('PRAGMA synchronous = FULL')\n"
+        "conn.execute('PRAGMA cache_size = 1')\n"
+        "conn.execute('BEGIN IMMEDIATE')\n"
+        "for stmt in json.loads(sys.stdin.read()):\n"
+        "    conn.execute(stmt)\n"
+        "os._exit(1)\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script, str(db_path)],
+        input=json.dumps(statements),
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    journal_path = db_path.parent / f"{db_path.name}-journal"
+    assert journal_path.is_file() and journal_path.stat().st_size > 0
+    return journal_path
+
+
+def test_cli_hot_journal_status_guidance_and_chat_recovery(tmp_path: Path) -> None:
+    env = _cli_env(tmp_path)
+    data_dir = tmp_path / "cli-hot-journal"
+
+    first = _run_cli(
+        [
+            "chat",
+            "--data-dir",
+            str(data_dir),
+            "--history",
+            "--skip-intro",
+            "-m",
+            "committed before crash",
+        ],
+        env=env,
+        cwd=tmp_path,
+    )
+    assert first.returncode == 0, first.stderr
+    expected_id = _extract_identity(first.stdout)
+    db_path = data_dir / DB_FILENAME
+
+    crash_statements = [
+        (
+            f"INSERT INTO sessions VALUES ('crash-sess', '{expected_id}', "
+            "'2026-11-25T00:00:00Z', NULL, 1)"
+        ),
+        *[
+            (
+                f"INSERT INTO turns VALUES ('crash-turn-{idx}', 'crash-sess', {idx}, "
+                f"'{('z' * 8192)}', 'uncommitted', 'offline-simulated', '2026-11-25T00:00:00Z')"
+            )
+            for idx in range(1, 10)
+        ],
+    ]
+    journal_path = _spawn_hot_journal_crash(db_path, statements=crash_statements)
+    pre_db_digest = _sha256(db_path)
+    pre_journal_digest = _sha256(journal_path)
+
+    # Read-only status gives actionable guidance and does not modify db or journal.
+    status_res = _run_cli(
+        ["status", "--data-dir", str(data_dir)], env=env, cwd=tmp_path
+    )
+    assert status_res.returncode == 1
+    assert "unrecovered SQLite rollback journal" in status_res.stderr
+    assert "bunny chat" in status_res.stderr
+    assert "Traceback" not in status_res.stderr
+    assert _sha256(db_path) == pre_db_digest
+    assert _sha256(journal_path) == pre_journal_digest
+
+    # Writable bunny chat recovers cleanly with the same identity and committed turns.
+    resumed = _run_cli(
+        ["chat", "--data-dir", str(data_dir), "--history", "-m", "after recovery"],
+        env=env,
+        cwd=tmp_path,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert _extract_identity(resumed.stdout) == expected_id
+    assert "1 prior turn(s) loaded" in resumed.stdout
+    assert not journal_path.exists()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        turns = conn.execute(
+            "SELECT user_text FROM turns ORDER BY created_at"
+        ).fetchall()
+        assert turns == [("committed before crash",), ("after recovery",)]
+    finally:
+        conn.close()
+
+    # Refusal preservation: foreign and newer-schema DBs with hot journals remain untouched.
+    foreign_dir = tmp_path / "foreign-hot"
+    foreign_dir.mkdir()
+    foreign_db = foreign_dir / DB_FILENAME
+    conn = sqlite3.connect(str(foreign_db))
+    conn.execute("CREATE TABLE foreign_data (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO foreign_data (body) VALUES ('keep')")
+    conn.commit()
+    conn.close()
+    foreign_journal = _spawn_hot_journal_crash(
+        foreign_db,
+        statements=[
+            f"INSERT INTO foreign_data (body) VALUES ('{('f' * 8192)}')"
+            for _ in range(10)
+        ],
+    )
+    f_db_digest = _sha256(foreign_db)
+    f_journal_digest = _sha256(foreign_journal)
+
+    foreign_chat = _run_cli(
+        ["chat", "--data-dir", str(foreign_dir), "-m", "hello"], env=env, cwd=tmp_path
+    )
+    assert foreign_chat.returncode == 1
+    assert "Storage error:" in foreign_chat.stderr
+    assert "Traceback" not in foreign_chat.stderr
+    assert _sha256(foreign_db) == f_db_digest
+    assert _sha256(foreign_journal) == f_journal_digest
+
+    newer_dir = tmp_path / "newer-hot"
+    assert (
+        _run_cli(
+            ["chat", "--data-dir", str(newer_dir), "--skip-intro", "-m", "init"],
+            env=env,
+            cwd=tmp_path,
+        ).returncode
+        == 0
+    )
+    newer_db = newer_dir / DB_FILENAME
+    conn = sqlite3.connect(str(newer_db))
+    newer_id = conn.execute("SELECT identity_id FROM identity").fetchone()[0]
+    conn.execute("PRAGMA user_version = 99")
+    conn.commit()
+    conn.close()
+    newer_journal = _spawn_hot_journal_crash(
+        newer_db,
+        statements=[
+            f"INSERT INTO sessions VALUES ('s', '{newer_id}', '2026-11-25T00:00:00Z', NULL, 1)",
+            *[
+                (
+                    f"INSERT INTO turns VALUES ('t-{idx}', 's', {idx}, '{('n' * 8192)}', "
+                    "'r', 'offline-simulated', '2026-11-25T00:00:00Z')"
+                )
+                for idx in range(1, 10)
+            ],
+        ],
+    )
+    n_db_digest = _sha256(newer_db)
+    n_journal_digest = _sha256(newer_journal)
+
+    newer_chat = _run_cli(
+        ["chat", "--data-dir", str(newer_dir), "-m", "hello"], env=env, cwd=tmp_path
+    )
+    assert newer_chat.returncode == 1
+    assert "newer than supported" in newer_chat.stderr
+    assert _sha256(newer_db) == n_db_digest
+    assert _sha256(newer_journal) == n_journal_digest
+
+
+def test_cli_interrupted_init_retry_and_unrelated_file_preservation(
+    tmp_path: Path,
+) -> None:
+    env = _cli_env(tmp_path)
+    data_dir = tmp_path / "stale-init"
+    data_dir.mkdir()
+    stale_tmp = data_dir / f".{DB_FILENAME}.init-deadbeef.tmp"
+    stale_journal = data_dir / f".{DB_FILENAME}.init-deadbeef.tmp-journal"
+    stale_tmp.write_bytes(b"interrupted init")
+    stale_journal.write_bytes(b"interrupted journal")
+
+    status_before = _run_cli(
+        ["status", "--data-dir", str(data_dir)], env=env, cwd=tmp_path
+    )
+    assert status_before.returncode == 0, status_before.stderr
+    assert "State: not initialized" in status_before.stdout
+    assert not (data_dir / DB_FILENAME).exists()
+
+    first = _run_cli(
+        ["chat", "--data-dir", str(data_dir), "--skip-intro", "-m", "retry works"],
+        env=env,
+        cwd=tmp_path,
+    )
+    assert first.returncode == 0, first.stderr
+    first_id = _extract_identity(first.stdout)
+    assert not stale_tmp.exists()
+    assert not stale_journal.exists()
+
+    restart = _run_cli(
+        ["chat", "--data-dir", str(data_dir), "-m", "second"], env=env, cwd=tmp_path
+    )
+    assert restart.returncode == 0, restart.stderr
+    assert _extract_identity(restart.stdout) == first_id
+
+    # Pre-existing empty or damaged database stays untouched.
+    for name, payload in (("empty", b""), ("damaged", b"corrupt bytes")):
+        bad_dir = tmp_path / f"preexisting-{name}"
+        bad_dir.mkdir()
+        bad_db = bad_dir / DB_FILENAME
+        bad_db.write_bytes(payload)
+        digest = _sha256(bad_db)
+
+        bad_chat = _run_cli(
+            ["chat", "--data-dir", str(bad_dir), "-m", "hi"], env=env, cwd=tmp_path
+        )
+        assert bad_chat.returncode == 1
+        assert "Storage error:" in bad_chat.stderr
+        assert "Traceback" not in bad_chat.stderr
+        assert _sha256(bad_db) == digest
+
+
+def test_cli_lock_contention_exits_nonzero_without_traceback_and_recovers(
+    tmp_path: Path,
+) -> None:
+    env = _cli_env(tmp_path)
+    data_dir = tmp_path / "cli-locked"
+    data_dir.mkdir()
+    (data_dir / "config.toml").write_text(
+        "[storage]\nbusy_timeout_ms = 200\n", encoding="utf-8"
+    )
+
+    first = _run_cli(
+        ["chat", "--data-dir", str(data_dir), "--skip-intro", "-m", "init"],
+        env=env,
+        cwd=tmp_path,
+    )
+    assert first.returncode == 0, first.stderr
+    expected_id = _extract_identity(first.stdout)
+
+    holder = sqlite3.connect(str(data_dir / DB_FILENAME), isolation_level=None)
+    try:
+        holder.execute("BEGIN EXCLUSIVE")
+        locked_status = _run_cli(
+            ["status", "--data-dir", str(data_dir)], env=env, cwd=tmp_path
+        )
+        assert locked_status.returncode == 1
+        assert "Storage error:" in locked_status.stderr
+        assert "locked" in locked_status.stderr.lower()
+        assert "Traceback" not in locked_status.stderr
+
+        locked_chat = _run_cli(
+            ["chat", "--data-dir", str(data_dir), "-m", "blocked"],
+            env=env,
+            cwd=tmp_path,
+        )
+        assert locked_chat.returncode == 1
+        assert "Storage error:" in locked_chat.stderr
+        assert "locked" in locked_chat.stderr.lower()
+        assert "Traceback" not in locked_chat.stderr
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    after_status = _run_cli(
+        ["status", "--data-dir", str(data_dir)], env=env, cwd=tmp_path
+    )
+    assert after_status.returncode == 0, after_status.stderr
+    assert expected_id in after_status.stdout
+
+    after_chat = _run_cli(
+        ["chat", "--data-dir", str(data_dir), "-m", "unblocked"], env=env, cwd=tmp_path
+    )
+    assert after_chat.returncode == 0, after_chat.stderr
+    assert _extract_identity(after_chat.stdout) == expected_id

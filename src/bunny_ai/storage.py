@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import random
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -18,10 +20,12 @@ from typing import Literal, cast
 from bunny_ai.config import ensure_data_dir, restrict_path_permissions
 from bunny_ai.errors import (
     CorruptDatabaseError,
+    DatabaseLockedError,
     IncompatibleSchemaError,
     MigrationError,
     MissingIdentityError,
     NewerSchemaError,
+    RecoveryRequiredError,
     StorageError,
 )
 from bunny_ai.migrations import CURRENT_SCHEMA_VERSION, MIGRATIONS
@@ -29,6 +33,7 @@ from bunny_ai.migrations import CURRENT_SCHEMA_VERSION, MIGRATIONS
 SQLITE_HEADER = b"SQLite format 3\x00"
 DB_FILENAME = "bunny.sqlite3"
 LOCK_FILENAME = ".bunny.lock"
+INIT_STAGING_PREFIX = f".{DB_FILENAME}.init-"
 
 _REQUIRED_TABLES_BY_VERSION: dict[int, frozenset[str]] = {
     1: frozenset({"schema_migrations", "identity"}),
@@ -95,22 +100,57 @@ def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
     return "locked" in message or "busy" in message
 
 
+def _journal_path(db_path: Path) -> Path:
+    return db_path.parent / f"{db_path.name}-journal"
+
+
+def _has_hot_journal(db_path: Path) -> bool:
+    journal = _journal_path(db_path)
+    return journal.is_file() and journal.stat().st_size > 0
+
+
+def _translate_sqlite_error(exc: sqlite3.Error, context: str) -> StorageError:
+    if isinstance(exc, sqlite3.OperationalError) and _is_lock_error(exc):
+        return DatabaseLockedError(
+            f"Database is currently locked by another process ({context}). "
+            "Wait for the other process to finish and retry."
+        )
+    return StorageError(f"SQLite storage failure ({context}): {exc}")
+
+
 def _open_rw(db_path: Path, busy_timeout_ms: int) -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        str(db_path),
-        timeout=busy_timeout_ms / 1000.0,
-        isolation_level=None,
-    )
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
-    conn.execute("PRAGMA journal_mode = DELETE")
-    return conn
+    deadline = time.monotonic() + (busy_timeout_ms / 1000.0)
+    while True:
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(
+                str(db_path),
+                timeout=busy_timeout_ms / 1000.0,
+                isolation_level=None,
+            )
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            conn.execute("PRAGMA journal_mode = DELETE")
+            return conn
+        except sqlite3.OperationalError as exc:
+            if conn is not None:
+                conn.close()
+            if _is_lock_error(exc):
+                if time.monotonic() < deadline:
+                    time.sleep(0.01 + random.uniform(0.0, 0.02))
+                    continue
+                raise DatabaseLockedError(
+                    f"Database '{db_path}' is currently locked by another process. "
+                    "Wait for the other process to finish and retry."
+                ) from exc
+            raise StorageError(f"Failed to open database '{db_path}': {exc}") from exc
 
 
 def _open_ro(db_path: Path, busy_timeout_ms: int) -> sqlite3.Connection:
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     deadline = time.monotonic() + (busy_timeout_ms / 1000.0)
     while True:
+        conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(
                 uri,
@@ -121,9 +161,16 @@ def _open_ro(db_path: Path, busy_timeout_ms: int) -> sqlite3.Connection:
             conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
             return conn
         except sqlite3.OperationalError as exc:
-            if _is_lock_error(exc) and time.monotonic() < deadline:
-                time.sleep(0.01 + random.uniform(0.0, 0.02))
-                continue
+            if conn is not None:
+                conn.close()
+            if _is_lock_error(exc):
+                if time.monotonic() < deadline:
+                    time.sleep(0.01 + random.uniform(0.0, 0.02))
+                    continue
+                raise DatabaseLockedError(
+                    f"Database '{db_path}' is currently locked by another process. "
+                    "Wait for the other process to finish and retry."
+                ) from exc
             raise
 
 
@@ -134,10 +181,15 @@ def _begin_immediate(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
             conn.execute("BEGIN IMMEDIATE")
             return
         except sqlite3.OperationalError as exc:
-            if _is_lock_error(exc) and time.monotonic() < deadline:
-                time.sleep(0.01 + random.uniform(0.0, 0.02))
-                continue
-            raise
+            if _is_lock_error(exc):
+                if time.monotonic() < deadline:
+                    time.sleep(0.01 + random.uniform(0.0, 0.02))
+                    continue
+                raise DatabaseLockedError(
+                    "Database is currently locked by another process. "
+                    "Wait for the other process to finish and retry."
+                ) from exc
+            raise StorageError(f"Failed to begin transaction: {exc}") from exc
 
 
 @contextmanager
@@ -165,7 +217,7 @@ def _acquire_init_lock(data_dir: Path, busy_timeout_ms: int) -> Iterator[None]:
                 break
             except OSError as exc:
                 if time.monotonic() >= deadline:
-                    raise StorageError(
+                    raise DatabaseLockedError(
                         f"Timed out waiting for storage lock '{lock_path}': {exc}"
                     ) from exc
                 time.sleep(0.01 + random.uniform(0.0, 0.02))
@@ -326,12 +378,32 @@ def _validate_existing_ro(
         return schema_version, identity, session_count, turn_count
     except (
         CorruptDatabaseError,
+        DatabaseLockedError,
         NewerSchemaError,
         IncompatibleSchemaError,
         MissingIdentityError,
+        RecoveryRequiredError,
         StorageError,
     ):
         raise
+    except sqlite3.OperationalError as exc:
+        if _is_lock_error(exc):
+            raise DatabaseLockedError(
+                f"Database '{db_path}' is currently locked by another process. "
+                "Wait for the other process to finish and retry."
+            ) from exc
+        if "readonly" in str(exc).lower() and _has_hot_journal(db_path):
+            journal = _journal_path(db_path)
+            raise RecoveryRequiredError(
+                f"Database '{db_path}' has an unrecovered SQLite rollback journal "
+                f"('{journal.name}') from an interrupted write. Read-only inspection "
+                "cannot recover it; run `bunny chat` on this profile to recover "
+                "the last committed state (do not delete the journal file manually)."
+            ) from exc
+        raise CorruptDatabaseError(
+            f"Database '{db_path}' is corrupt or unreadable: {exc}. "
+            "Existing file was preserved."
+        ) from exc
     except sqlite3.DatabaseError as exc:
         raise CorruptDatabaseError(
             f"Database '{db_path}' is corrupt or unreadable: {exc}. "
@@ -458,41 +530,82 @@ class LocalStorage:
                 f"Schema migration failed (backup preserved at '{backup_path}'): {exc}"
             ) from exc
 
+    def _cleanup_stale_init_files(self) -> None:
+        for candidate in self.data_dir.glob(f"{INIT_STAGING_PREFIX}*.tmp*"):
+            if candidate.is_file():
+                try:
+                    candidate.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _recover_hot_journal_if_valid(self) -> tuple[int, IdentityRecord]:
+        journal = _journal_path(self.db_path)
+        with tempfile.TemporaryDirectory(prefix="bunny-recover-") as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            staged_db = temp_dir / DB_FILENAME
+            shutil.copy2(self.db_path, staged_db)
+            if journal.is_file():
+                shutil.copy2(journal, temp_dir / journal.name)
+
+            staged_conn: sqlite3.Connection | None = None
+            try:
+                staged_conn = _open_rw(staged_db, self.busy_timeout_ms)
+                staged_check = staged_conn.execute("PRAGMA integrity_check").fetchall()
+                if staged_check != [("ok",)]:
+                    raise CorruptDatabaseError(
+                        f"Database '{self.db_path}' failed integrity check during "
+                        f"staged journal recovery: {staged_check}. "
+                        "Existing file was preserved."
+                    )
+            except sqlite3.DatabaseError as exc:
+                raise CorruptDatabaseError(
+                    f"Database '{self.db_path}' is corrupt or unreadable: {exc}. "
+                    "Existing file was preserved."
+                ) from exc
+            finally:
+                if staged_conn is not None:
+                    staged_conn.close()
+
+            # Validate staged recovered database before touching the real files.
+            _validate_existing_ro(staged_db, self.busy_timeout_ms)
+
+        rw_conn: sqlite3.Connection | None = None
+        try:
+            rw_conn = _open_rw(self.db_path, self.busy_timeout_ms)
+            real_check = rw_conn.execute("PRAGMA integrity_check").fetchall()
+            if real_check != [("ok",)]:
+                raise CorruptDatabaseError(
+                    f"Database '{self.db_path}' failed integrity check after "
+                    f"journal recovery: {real_check}."
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CorruptDatabaseError(
+                f"Database '{self.db_path}' failed journal recovery: {exc}."
+            ) from exc
+        finally:
+            if rw_conn is not None:
+                rw_conn.close()
+
+        restrict_path_permissions(self.db_path, is_dir=False)
+        schema_version, identity, _, _ = _validate_existing_ro(
+            self.db_path, self.busy_timeout_ms
+        )
+        return schema_version, identity
+
     def _initialize_fresh(
         self, *, seed_version: str, style_version: str
     ) -> tuple[IdentityRecord, bool]:
-        conn = _open_rw(self.db_path, self.busy_timeout_ms)
+        staging_path = (
+            self.data_dir / f"{INIT_STAGING_PREFIX}{uuid.uuid4().hex[:8]}.tmp"
+        )
+        staging_conn: sqlite3.Connection | None = None
         try:
-            _begin_immediate(conn, self.busy_timeout_ms)
-            version_row = conn.execute("PRAGMA user_version").fetchone()
-            actual_version = int(version_row[0]) if version_row is not None else 0
-            if actual_version == CURRENT_SCHEMA_VERSION:
-                identity = _read_identity(conn)
-                conn.execute("COMMIT")
-                self._conn = conn
-                return identity, False
-
-            if actual_version != 0:
-                conn.execute("ROLLBACK")
-                conn.close()
-                raise IncompatibleSchemaError(
-                    f"Unexpected schema version {actual_version} during initialization."
-                )
-
-            existing = conn.execute(
-                "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
-            ).fetchall()
-            if existing:
-                conn.execute("ROLLBACK")
-                conn.close()
-                raise IncompatibleSchemaError(
-                    "Existing unversioned tables found during initialization."
-                )
-
+            staging_conn = _open_rw(staging_path, self.busy_timeout_ms)
+            _begin_immediate(staging_conn, self.busy_timeout_ms)
             now = _utc_now_iso()
             for migration in MIGRATIONS:
-                migration.apply(conn)
-                conn.execute(
+                migration.apply(staging_conn)
+                staging_conn.execute(
                     """
                     INSERT INTO schema_migrations (version, applied_at, description)
                     VALUES (?, ?, ?)
@@ -501,7 +614,7 @@ class LocalStorage:
                 )
 
             identity_id = str(uuid.uuid4())
-            conn.execute(
+            staging_conn.execute(
                 """
                 INSERT INTO identity (
                     singleton, identity_id, seed_version, style_version,
@@ -511,9 +624,25 @@ class LocalStorage:
                 """,
                 (identity_id, seed_version, style_version, now, now, now),
             )
-            conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-            conn.execute("COMMIT")
+            staging_conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+            staging_conn.execute("COMMIT")
+
+            check = staging_conn.execute("PRAGMA integrity_check").fetchall()
+            if check != [("ok",)]:
+                raise StorageError(
+                    f"Newly initialized database failed integrity check: {check}"
+                )
+            staging_conn.close()
+            staging_conn = None
+
+            restrict_path_permissions(staging_path, is_dir=False)
+            if self.db_path.exists():
+                raise StorageError(
+                    f"Database '{self.db_path}' appeared unexpectedly during initialization."
+                )
+            staging_path.rename(self.db_path)
             restrict_path_permissions(self.db_path, is_dir=False)
+            self._conn = _open_rw(self.db_path, self.busy_timeout_ms)
             identity = IdentityRecord(
                 identity_id=identity_id,
                 seed_version=seed_version,
@@ -523,35 +652,38 @@ class LocalStorage:
                 onboarding_state="greeted",
                 updated_at=now,
             )
-            self._conn = conn
             return identity, True
-        except (
-            CorruptDatabaseError,
-            IncompatibleSchemaError,
-            MissingIdentityError,
-            NewerSchemaError,
-            MigrationError,
-            StorageError,
-        ):
+        except StorageError:
             raise
         except Exception as exc:
-            try:
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            conn.close()
             raise StorageError(f"Failed to initialize local database: {exc}") from exc
+        finally:
+            if staging_conn is not None:
+                try:
+                    if staging_conn.in_transaction:
+                        staging_conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                staging_conn.close()
+            for leftover in (staging_path, _journal_path(staging_path)):
+                if leftover.exists():
+                    try:
+                        leftover.unlink()
+                    except OSError:
+                        pass
 
     def initialize_or_load(
         self, *, seed_version: str, style_version: str
     ) -> InitResult:
-        """Validate, migrate if needed, or atomically initialize the local identity."""
+        """Validate, recover/migrate if needed, or atomically initialize the local identity."""
         with _acquire_init_lock(self.data_dir, self.busy_timeout_ms):
             if self.db_path.exists():
-                schema_version, identity, _, _ = _validate_existing_ro(
-                    self.db_path, self.busy_timeout_ms
-                )
+                try:
+                    schema_version, identity, _, _ = _validate_existing_ro(
+                        self.db_path, self.busy_timeout_ms
+                    )
+                except RecoveryRequiredError:
+                    schema_version, identity = self._recover_hot_journal_if_valid()
                 backup_path: Path | None = None
                 if schema_version < CURRENT_SCHEMA_VERSION:
                     backup_path = self._migrate_existing(schema_version)
@@ -565,6 +697,7 @@ class LocalStorage:
                     backup_path=backup_path,
                 )
 
+            self._cleanup_stale_init_files()
             identity, is_first_launch = self._initialize_fresh(
                 seed_version=seed_version,
                 style_version=style_version,
@@ -595,6 +728,10 @@ class LocalStorage:
             identity = _read_identity(conn)
             conn.execute("COMMIT")
             return identity
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise _translate_sqlite_error(exc, "update onboarding state") from exc
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -618,6 +755,10 @@ class LocalStorage:
             )
             conn.execute("COMMIT")
             return session_id
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise _translate_sqlite_error(exc, "start history session") from exc
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -666,6 +807,10 @@ class LocalStorage:
                 provider_mode=provider_mode,
                 created_at=now,
             )
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise _translate_sqlite_error(exc, "record turn") from exc
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -686,6 +831,10 @@ class LocalStorage:
                 (now, session_id),
             )
             conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise _translate_sqlite_error(exc, "end history session") from exc
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -699,18 +848,21 @@ class LocalStorage:
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
-        rows = conn.execute(
-            """
-            SELECT t.turn_id, t.session_id, t.turn_index, t.user_text,
-                   t.assistant_text, t.provider_mode, t.created_at
-            FROM turns t
-            JOIN sessions s ON s.session_id = t.session_id
-            WHERE s.identity_id = ? AND s.history_enabled = 1 AND t.created_at >= ?
-            ORDER BY t.created_at DESC, t.turn_index DESC
-            LIMIT ?
-            """,
-            (identity_id, cutoff, limit),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """
+                SELECT t.turn_id, t.session_id, t.turn_index, t.user_text,
+                       t.assistant_text, t.provider_mode, t.created_at
+                FROM turns t
+                JOIN sessions s ON s.session_id = t.session_id
+                WHERE s.identity_id = ? AND s.history_enabled = 1 AND t.created_at >= ?
+                ORDER BY t.created_at DESC, t.turn_index DESC
+                LIMIT ?
+                """,
+                (identity_id, cutoff, limit),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise _translate_sqlite_error(exc, "load recent turns") from exc
         records = [
             TurnRecord(
                 turn_id=str(row[0]),
@@ -765,6 +917,10 @@ class LocalStorage:
             )
             conn.execute("COMMIT")
             return deleted_turns
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise _translate_sqlite_error(exc, "prune expired history") from exc
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")

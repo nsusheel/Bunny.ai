@@ -31,3 +31,11 @@ class MissingIdentityError(StorageError):
 
 class MigrationError(StorageError):
     """Preflight backup or transactional schema migration failed."""
+
+
+class RecoveryRequiredError(StorageError):
+    """Database has an unrecovered rollback journal that read-only inspection cannot replay."""
+
+
+class DatabaseLockedError(StorageError):
+    """Database or storage lock is held by another active process."""
