@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import shutil
 import sqlite3
 import sys
@@ -34,6 +35,10 @@ SQLITE_HEADER = b"SQLite format 3\x00"
 DB_FILENAME = "bunny.sqlite3"
 LOCK_FILENAME = ".bunny.lock"
 INIT_STAGING_PREFIX = f".{DB_FILENAME}.init-"
+_INIT_STAGING_FILENAME_RE = re.compile(
+    rf"{re.escape(INIT_STAGING_PREFIX)}[0-9a-f]{{8}}\.tmp(?:-journal)?",
+    re.ASCII,
+)
 
 _REQUIRED_TABLES_BY_VERSION: dict[int, frozenset[str]] = {
     1: frozenset({"schema_migrations", "identity"}),
@@ -531,8 +536,12 @@ class LocalStorage:
             ) from exc
 
     def _cleanup_stale_init_files(self) -> None:
-        for candidate in self.data_dir.glob(f"{INIT_STAGING_PREFIX}*.tmp*"):
-            if candidate.is_file():
+        for candidate in self.data_dir.iterdir():
+            if (
+                _INIT_STAGING_FILENAME_RE.fullmatch(candidate.name) is not None
+                and not candidate.is_symlink()
+                and candidate.is_file()
+            ):
                 try:
                     candidate.unlink()
                 except FileNotFoundError:

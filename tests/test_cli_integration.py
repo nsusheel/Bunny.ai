@@ -765,8 +765,12 @@ def test_cli_interrupted_init_retry_and_unrelated_file_preservation(
     data_dir.mkdir()
     stale_tmp = data_dir / f".{DB_FILENAME}.init-deadbeef.tmp"
     stale_journal = data_dir / f".{DB_FILENAME}.init-deadbeef.tmp-journal"
+    lookalike_backup = data_dir / f".{DB_FILENAME}.init-deadbeef.tmp.backup"
+    lookalike_invalid = data_dir / f".{DB_FILENAME}.init-nothex01.tmp"
     stale_tmp.write_bytes(b"interrupted init")
     stale_journal.write_bytes(b"interrupted journal")
+    lookalike_backup.write_bytes(b"user-backup-bytes")
+    lookalike_invalid.write_bytes(b"user-invalid-id-bytes")
 
     status_before = _run_cli(
         ["status", "--data-dir", str(data_dir)], env=env, cwd=tmp_path
@@ -784,6 +788,14 @@ def test_cli_interrupted_init_retry_and_unrelated_file_preservation(
     first_id = _extract_identity(first.stdout)
     assert not stale_tmp.exists()
     assert not stale_journal.exists()
+    assert lookalike_backup.read_bytes() == b"user-backup-bytes"
+    assert lookalike_invalid.read_bytes() == b"user-invalid-id-bytes"
+
+    conn = sqlite3.connect(str(data_dir / DB_FILENAME))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM identity").fetchone() == (1,)
+    finally:
+        conn.close()
 
     restart = _run_cli(
         ["chat", "--data-dir", str(data_dir), "-m", "second"], env=env, cwd=tmp_path

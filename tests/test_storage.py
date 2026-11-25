@@ -540,11 +540,16 @@ def test_interrupted_first_init_is_retryable_and_preserves_unrelated_files(
 
     monkeypatch.undo()
 
-    # Simulate stale staging files left behind by a hard-killed first launch.
+    # Simulate stale staging files left behind by a hard-killed first launch,
+    # alongside similarly named lookalike files that must be preserved.
     stale_db = data_dir / f"{INIT_STAGING_PREFIX}deadbeef.tmp"
     stale_journal = data_dir / f"{INIT_STAGING_PREFIX}deadbeef.tmp-journal"
+    lookalike_backup = data_dir / f"{INIT_STAGING_PREFIX}deadbeef.tmp.backup"
+    lookalike_invalid = data_dir / f"{INIT_STAGING_PREFIX}nothex01.tmp"
     stale_db.write_bytes(b"partial")
     stale_journal.write_bytes(b"partial-journal")
+    lookalike_backup.write_bytes(b"keep-backup-bytes")
+    lookalike_invalid.write_bytes(b"keep-invalid-bytes")
 
     assert LocalStorage(data_dir).inspect().exists is False
 
@@ -552,7 +557,16 @@ def test_interrupted_first_init_is_retryable_and_preserves_unrelated_files(
     init = retried.initialize_or_load(seed_version="seed-1", style_version="style-1")
     retried.close()
     assert init.is_first_launch is True
-    assert list(data_dir.glob(f"{INIT_STAGING_PREFIX}*")) == []
+    assert not stale_db.exists()
+    assert not stale_journal.exists()
+    assert lookalike_backup.read_bytes() == b"keep-backup-bytes"
+    assert lookalike_invalid.read_bytes() == b"keep-invalid-bytes"
+
+    conn = sqlite3.connect(str(data_dir / DB_FILENAME))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM identity").fetchone() == (1,)
+    finally:
+        conn.close()
 
     # Pre-existing empty or damaged files remain untouched.
     for name, payload in (("empty", b""), ("damaged", b"not sqlite")):
