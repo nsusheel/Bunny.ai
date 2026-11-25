@@ -41,6 +41,19 @@ uv run --no-sync bunny demo "Hello Bunny"
 
 The demo reports a character count and exits. It needs no API key, sends no network requests and saves no conversation. The initial setup may download Python and development tools. See [contributor setup](CONTRIBUTING.md#development-setup) for validation commands.
 
+### Try offline identity and restart
+
+Try first launch and restart in a disposable profile using `--data-dir` (simulated offline mode; no API key or network):
+
+```sh
+uv run --no-sync bunny chat --data-dir ./tmp-bunny-profile
+uv run --no-sync bunny chat --data-dir ./tmp-bunny-profile -m "Back after restart"
+```
+
+- **History retention:** Local conversation history is opt-in (`history.enabled = false` by default). When `bunny chat` starts on a valid database (including `--no-history` sessions), turns older than `history.retention_days` (default `30`) are pruned in a transaction while keeping your identity and recent turns. `bunny status` stays strictly read-only.
+- **Backup and deletion limits:** Preflight schema-migration backups under `<data_dir>/backups/` are preserved when expired turns are pruned, and SQLite deletion is not secure filesystem erasure.
+- **Directory permissions:** Newly created data directories use owner-only permissions (`0o700`) on POSIX, while existing user-supplied directory modes are preserved. On Windows, Bunny keeps inherited ACLs, so choosing a shared folder can expose your unencrypted SQLite database and migration backups to other accounts with access to that folder.
+
 ```mermaid
 ---
 config:
