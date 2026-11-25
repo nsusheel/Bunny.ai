@@ -11,7 +11,10 @@ def test_help(args: list[str], capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as result:
         main(args)
     assert result.value.code == 0
-    assert "demo" in capsys.readouterr().out
+    stdout = capsys.readouterr().out
+    assert "demo" in stdout
+    assert "chat" in stdout
+    assert "status" in stdout
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -24,6 +27,8 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 def test_demo_is_simulated_and_leaves_no_files(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    data_dir = tmp_path / "env-data"
+    monkeypatch.setenv("BUNNY_DATA_DIR", str(data_dir))
     monkeypatch.chdir(tmp_path)
     assert main(["demo", "Hello Bunny"]) == 0
     output = capsys.readouterr()
@@ -33,7 +38,7 @@ def test_demo_is_simulated_and_leaves_no_files(
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("args", [["demo"], ["demo", "   "], ["chat"]])
+@pytest.mark.parametrize("args", [["demo"], ["demo", "   "], ["unknown-cmd"]])
 def test_invalid_input_fails(
     args: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:

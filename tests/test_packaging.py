@@ -20,17 +20,22 @@ SYNTHETIC_FILES: dict[str, str] = {
 }
 
 
-def _copy_package_tree(destination: Path) -> None:
-    for relative_path in (
-        "pyproject.toml",
-        "README.md",
-        "LICENSE",
-        "src/bunny_ai/__init__.py",
-        "src/bunny_ai/cli.py",
-    ):
+def _package_source_files() -> list[str]:
+    src_root = REPO_ROOT / "src" / "bunny_ai"
+    return sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in src_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+
+
+def _copy_package_tree(destination: Path) -> list[str]:
+    package_files = _package_source_files()
+    for relative_path in ("pyproject.toml", "README.md", "LICENSE", *package_files):
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / relative_path, target)
+    return package_files
 
 
 def _run_uv_build(
@@ -58,7 +63,7 @@ def _run_uv_build(
 
 def test_archives_exclude_env_and_sqlite_files(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
-    _copy_package_tree(project_dir)
+    package_files = _copy_package_tree(project_dir)
 
     package_dir = project_dir / "src" / "bunny_ai"
     for relative_path, content in SYNTHETIC_FILES.items():
@@ -98,14 +103,11 @@ def test_archives_exclude_env_and_sqlite_files(tmp_path: Path) -> None:
         for member in sdist_members
         if len(PurePosixPath(member).parts) > 1
     }
-    assert {
-        "pyproject.toml",
-        "README.md",
-        "LICENSE",
-        "src/bunny_ai/__init__.py",
-        "src/bunny_ai/cli.py",
-    }.issubset(sdist_relative)
+    assert {"pyproject.toml", "README.md", "LICENSE", *package_files}.issubset(
+        sdist_relative
+    )
 
+    expected_wheel_files = {path.removeprefix("src/") for path in package_files}
     for label, wheel_path in (
         ("wheel", wheels[0]),
         ("direct wheel", direct_wheels[0]),
@@ -120,7 +122,7 @@ def test_archives_exclude_env_and_sqlite_files(tmp_path: Path) -> None:
         ]
         assert leaked_wheel == [], f"{label} leaked synthetic files: {leaked_wheel}"
 
-        assert {"bunny_ai/__init__.py", "bunny_ai/cli.py"}.issubset(wheel_members)
+        assert expected_wheel_files.issubset(wheel_members)
         assert any(
             member.endswith(".dist-info/licenses/LICENSE") for member in wheel_members
         )
