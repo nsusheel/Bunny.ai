@@ -1,17 +1,18 @@
 # Bunny.ai context
 
-Last reconciled 2026-11-24.
+Last reconciled 2026-11-25.
 
 ## What it is
 
-Bunny.ai is an open-source, hardware-independent, provider-agnostic personal assistant built around ownership: identity, memories, configuration and hardware belong to the user, and the intelligence engine is interchangeable. Apache-2.0. This public repository is a documentation-only, pre-release foundation — no runnable implementation exists yet.
+Bunny.ai is an open-source, hardware-independent, provider-agnostic personal assistant built around ownership: identity, memories, configuration and hardware belong to the user, and the intelligence engine is interchangeable. Apache-2.0. The pre-release scaffold runs a simulated, offline CLI demo. Awakening is still in development.
 
 ## Current state
 
 - The documentation foundation and first public onboarding pass landed via PRs #1 and #2. The README is the visitor entry point. Canonical specifications live under docs/.
 - The README uses an editable SVG for the product overview. Keep canonical technical diagrams in Mermaid and put qualifications in nearby prose. See [diagram conventions](docs/ARCHITECTURE.md#diagram-conventions).
 - Documents: README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, LICENSE, and docs/{VISION, ARCHITECTURE, AWAKENING, PERSONALITY, MEMORY, PRIVACY, ROADMAP, DECISIONS, REVIEW-2026-11-24}. All relative links resolve.
-- Decision log D-001..D-022: accepted core (licence, documentation-first, no private-prototype import, gateway, local-first memory, deterministic security, budget-before-dispatch); provisional SQLite (D-007) and Pi 4 reference target (D-015); stack, voice, packaging, encryption open. Staged security review gates and community Code of Conduct adopted.
+- Decision log D-001..D-022: accepted core (licence, documentation-first, no private-prototype import, gateway, local-first memory, deterministic security, budget-before-dispatch). Python 3.12 with 3.13 compatibility, direct SQLite, and scaffold packaging are approved. The Pi 4 reference target remains provisional. Hosted provider, budget reservation details, voice, end-user distribution and encryption remain open.
+- The scaffold lives under `src/bunny_ai/`. [Development setup](CONTRIBUTING.md#development-setup) documents locked installs, tests, builds and installed-wheel smoke checks. Runtime dependencies are empty.
 - All 13 findings from the independent review (MiMo V2.6 Flash, 2026-11-24) recorded in docs/REVIEW-2026-11-24.md are resolved.
 
 ## Non-negotiable constraints

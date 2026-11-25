@@ -27,7 +27,7 @@ details in a report. Use redacted or synthetic examples.
 
 ## Scope
 
-In scope includes, once code exists:
+In scope for the scaffold and future capabilities as they are introduced:
 
 - Unexpected disclosure of credentials, memories, transcripts or personal context.
 - Permission bypasses, prompt-injection-to-action paths, and unsafe tool execution.
@@ -36,7 +36,7 @@ In scope includes, once code exists:
 - Memory deletion or export behaviour that contradicts the documented model.
 - Supply-chain or dependency issues in shipped components.
 
-Out of scope for this repository while it is documentation-only:
+Out of scope:
 
 - Vulnerabilities in third-party providers, SDKs or models themselves. Report those
   upstream; tell us if Bunny's design makes the impact worse.

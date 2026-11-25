@@ -1,7 +1,7 @@
 # Roadmap
 
-> **Status:** proposed milestones. This repository is currently a documentation-only
-> foundation. No milestone below is complete, and no release dates are promised.
+> **Status:** proposed milestones. The experimental offline scaffold begins Awakening.
+> No milestone below is complete, and no release dates are promised.
 
 The roadmap sequences work so that identity, memory and safety exist before voice,
 autonomy and device control. Each milestone should produce something genuinely usable,

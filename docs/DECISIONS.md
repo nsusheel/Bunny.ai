@@ -65,10 +65,11 @@ Selected context may be sent to a hosted model, and this must be disclosed hones
 
 ### D-007 - SQLite as the initial storage candidate
 
-**Status:** Provisional
+**Status:** Accepted for Awakening
 
-SQLite is the preferred starting point because it is embedded, transactional,
-cross-platform and appropriate for the reference hardware. It is not a permanent mandate.
+Use SQLite through the standard-library `sqlite3` module with explicit transactions.
+SQLite is embedded, transactional and cross-platform. Runtime validation on the
+reference hardware remains open. Persistence is scheduled after the scaffold.
 Full-text search should be tried before embeddings, and a dedicated vector database is not
 introduced without measured need.
 
@@ -164,11 +165,13 @@ such, provided the status is clear and no planned feature is presented as availa
 
 ### D-018 - Technology stack
 
-**Status:** Open (with a provisional Python baseline)
+**Status:** Accepted for Awakening
 
-No final implementation language has been selected. Python is the provisional baseline
-because the private prototype demonstrated a text-only path in Python, it is accessible to
-contributors, and it runs on the reference hardware. This is not a commitment.
+Use a modular monolith in Python 3.12, with Python 3.13 compatibility checks.
+Use uv and a lockfile for reproducible development environments, Ruff for formatting
+and linting, mypy for type checking, and pytest with fake providers for offline tests.
+Validate changes through GitHub Actions. Keep provider interfaces thin and neutral.
+Stage hosted integration after the offline gateway and ledger have been validated.
 
 Trade-offs considered:
 
@@ -179,8 +182,8 @@ Trade-offs considered:
 | Rust | Excellent performance, memory safety and single-binary deployment. | Steep learning curve, slower iteration, smaller AI SDK ecosystem. |
 | Go | Simple deployment, good concurrency and cross-compilation. | Less mature AI tooling; more verbose for rapid prototyping. |
 
-The decision should be revisited before v0.1 implementation, using measured evidence for
-memory, startup, packaging and local voice support.
+Measure startup, memory use and packaging on the reference hardware before making
+platform performance claims.
 
 ### D-019 - Voice stack
 
@@ -192,11 +195,11 @@ default. Candidate technologies require evaluation on the reference hardware.
 
 ### D-020 - Packaging and installation
 
-**Status:** Open
+**Status:** Accepted for the Awakening scaffold. End-user distribution remains open.
 
-The installation experience should be reproducible on a clean machine and should not
-require containers. Whether that means a Python package, a virtual environment, a native
-binary, a service unit or a combination is undecided.
+Build a Python wheel and source distribution from `pyproject.toml`. Validate the wheel
+in a clean virtual environment. The scaffold requires no containers.
+Release distribution and service supervision will be reviewed separately.
 
 ### D-021 - Memory encryption and export format
 
@@ -215,8 +218,12 @@ and must be configurable. The project does not optimise for engagement.
 
 ## Open questions
 
-- Final implementation language and repository layout.
 - Gateway interface shape and capability negotiation model.
+- Hosted provider selection and budget reservation policy. OpenAI Responses with
+  GPT-6 Luna is a candidate for later evaluation. Investigate request-specific
+  conservative bounds including serialized input, framing, reasoning, cache pricing
+  and account tier before approving any hosted dispatch. The model's maximum context
+  capacity is a conservative reference point for review, not the intended ongoing policy.
 - Personality schema and whether numeric traits are useful.
 - Memory schema, retention defaults and deletion propagation tests.
 - Voice stack, microphone hardware assumptions and privacy indicators.

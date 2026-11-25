@@ -1,0 +1,60 @@
+[build-system]
+requires = ["uv_build==0.13.8"]
+build-backend = "uv_build"
+
+[project]
+name = "bunny-ai"
+version = "0.1.0.dev0"
+description = "Experimental offline CLI scaffold for Bunny.ai"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Repository = "https://github.com/nsusheel/Bunny.ai"
+Issues = "https://github.com/nsusheel/Bunny.ai/issues"
+
+[project.scripts]
+bunny = "bunny_ai.cli:main"
+
+[dependency-groups]
+dev = ["mypy", "pytest", "ruff"]
+
+[tool.uv.build-backend]
+source-exclude = [
+    "HANDOVER.md",
+    "docs/AWAKENING-IMPLEMENTATION-PROPOSAL.md",
+    ".env",
+    ".env.*",
+    "*.sqlite",
+    "*.sqlite-*",
+    "*.sqlite.*",
+    "*.sqlite3",
+    "*.sqlite3-*",
+    "*.sqlite3.*",
+    "*.db",
+    "*.db-*",
+    "*.db.*",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"
