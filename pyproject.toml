@@ -28,7 +28,21 @@ bunny = "bunny_ai.cli:main"
 dev = ["mypy", "pytest", "ruff"]
 
 [tool.uv.build-backend]
-source-exclude = ["HANDOVER.md", "docs/AWAKENING-IMPLEMENTATION-PROPOSAL.md"]
+source-exclude = [
+    "HANDOVER.md",
+    "docs/AWAKENING-IMPLEMENTATION-PROPOSAL.md",
+    ".env",
+    ".env.*",
+    "*.sqlite",
+    "*.sqlite-*",
+    "*.sqlite.*",
+    "*.sqlite3",
+    "*.sqlite3-*",
+    "*.sqlite3.*",
+    "*.db",
+    "*.db-*",
+    "*.db.*",
+]
 
 [tool.ruff]
 target-version = "py312"
