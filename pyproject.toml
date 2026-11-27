@@ -42,6 +42,10 @@ source-exclude = [
     "*.db",
     "*.db-*",
     "*.db.*",
+    ".bunny.ledger.json",
+    ".bunny.ledger.lock",
+    ".bunny.inflight",
+    ".bunny.inflight/**",
 ]
 
 [tool.ruff]

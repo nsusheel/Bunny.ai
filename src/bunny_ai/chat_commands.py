@@ -9,7 +9,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from bunny_ai.app import AwakeningSession
-from bunny_ai.errors import StorageError
+from bunny_ai.budget import format_micro_usd
+from bunny_ai.errors import GatewayError, StorageError
 from bunny_ai.memory import (
     CATEGORY_LABELS,
     CONFIRMATION_LABELS,
@@ -28,7 +29,7 @@ from bunny_ai.neon import sanitize_terminal_text
 
 Confirm = Callable[[str], bool]
 
-COMMAND_PREFIXES = ("/remember", "/memory", "/history")
+COMMAND_PREFIXES = ("/remember", "/memory", "/history", "/spend")
 
 HELP_LINES = (
     "Memory (nothing is saved without your confirmation):",
@@ -44,6 +45,8 @@ HELP_LINES = (
     "History (separate from memory):",
     "  /history                      stored turns and what can be reused",
     "  /history clear                delete stored transcript (asks first; facts kept)",
+    "Budget & Gateway:",
+    "  /spend                        show budget caps, settled spend, holds and attempts",
 )
 
 _CONTEXT_RESTART = (
@@ -71,11 +74,13 @@ def _label(fact: MemoryFact) -> str:
 
 
 def handle_command(session: AwakeningSession, line: str, confirm: Confirm) -> None:
-    """Run one memory/history command, printing results and refusals."""
+    """Run one memory/history/spend command, printing results and refusals."""
     try:
         _dispatch(session, line.strip(), confirm)
     except MemoryCommandError as exc:
         print(f"Memory: {_text(str(exc))}")
+    except GatewayError as exc:
+        print(f"Budget: {_text(str(exc))}")
     except StorageError as exc:
         print(f"Storage error: {_text(str(exc))}")
 
@@ -87,6 +92,8 @@ def _dispatch(session: AwakeningSession, line: str, confirm: Confirm) -> None:
         _remember(session, parts[1:], confirm)
     elif command == "/history":
         _history(session, parts[1:], confirm)
+    elif command == "/spend":
+        _spend(session, parts[1:])
     else:
         _memory(session, line.split(None, 3)[1:], confirm)
 
@@ -277,3 +284,55 @@ def _history(session: AwakeningSession, args: list[str], confirm: Confirm) -> No
     print(
         "Clearing history never deletes memory facts; /memory reset never deletes history."
     )
+
+
+def _spend(session: AwakeningSession, args: list[str]) -> None:
+    if args:
+        print("Usage: /spend")
+        return
+    summary = session.ledger.summary()
+    per_req = (
+        format_micro_usd(summary.per_request_micro_usd)
+        if summary.per_request_micro_usd is not None
+        else "unset (refuses dispatch)"
+    )
+    cum = (
+        format_micro_usd(summary.cumulative_micro_usd)
+        if summary.cumulative_micro_usd is not None
+        else "unset (refuses dispatch)"
+    )
+    avail = (
+        format_micro_usd(summary.available_micro_usd)
+        if summary.available_micro_usd is not None
+        else "unset (refuses dispatch)"
+    )
+    print(
+        f"Budget: settled {format_micro_usd(summary.settled_micro_usd)} | "
+        f"held {format_micro_usd(summary.held_micro_usd)} | "
+        f"available {avail} | caps: per-request {per_req}, cumulative {cum}"
+    )
+    if summary.dispatch_blocked:
+        print(
+            f"Dispatch: BLOCKED ({_text(summary.block_reason or 'review required')}); "
+            "run `bunny budget clear-review` after reconciling."
+        )
+    else:
+        print("Dispatch: ok")
+    attempts = session.ledger.list_attempts(limit=5)
+    if not attempts:
+        print("Recent attempts: (none)")
+        return
+    print("Recent attempts:")
+    for att in attempts:
+        detail = (
+            att.refusal_code
+            or att.reason
+            or ("in-flight" if att.state == "reserved" else "")
+        )
+        suffix = f" ({_text(detail)})" if detail else ""
+        print(
+            f"  [{att.attempt_id[:8]}] {att.state} | "
+            f"reserved {format_micro_usd(att.reserved_micro_usd)} | "
+            f"settled {format_micro_usd(att.settled_micro_usd)} | "
+            f"held {format_micro_usd(att.held_micro_usd)}{suffix}"
+        )

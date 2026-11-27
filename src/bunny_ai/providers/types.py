@@ -55,3 +55,65 @@ class ModelProvider(Protocol):
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
         """Generate a simulated or model response for one validated turn."""
+
+
+@dataclass(frozen=True)
+class RequestOptions:
+    """Plain execution options passed across the provider transport boundary."""
+
+    store: bool = False
+    tools_enabled: bool = False
+    streaming: bool = False
+    background: bool = False
+    auto_truncation: bool = False
+    previous_response_id: str | None = None
+    max_output_tokens: int = 1_024
+
+
+@dataclass(frozen=True)
+class UsageMetering:
+    """Token usage reported by a provider receipt."""
+
+    uncached_input_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    output_tokens: int
+    reasoning_tokens: int = 0
+    model_id: str = ""
+    tier: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderDispatchRequest:
+    """Complete provider-neutral dispatch envelope."""
+
+    attempt_id: str
+    idempotency_key: str
+    provider_id: str
+    model_id: str
+    tier: str
+    endpoint: str
+    request: ProviderRequest
+    options: RequestOptions
+    deadline_seconds: float
+
+
+@dataclass(frozen=True)
+class ProviderReceipt:
+    """Receipt returned by a single provider transport call."""
+
+    receipt_id: str
+    attempt_id: str
+    response: ProviderResponse | None
+    usage: UsageMetering | None
+    complete: bool = True
+    finish_reason: str = "completed"
+    provider_error: str | None = None
+    retry_after_seconds: int | None = None
+
+
+class ProviderTransport(Protocol):
+    """Transport boundary for executing one authorized provider dispatch."""
+
+    def send(self, dispatch_request: ProviderDispatchRequest) -> ProviderReceipt:
+        """Execute one provider dispatch at most once and return its receipt."""

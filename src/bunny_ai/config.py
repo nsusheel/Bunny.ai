@@ -10,11 +10,15 @@ from pathlib import Path
 
 from bunny_ai.errors import ConfigError, StorageError
 
-_ALLOWED_SECTIONS = frozenset({"storage", "history", "onboarding"})
+_ALLOWED_SECTIONS = frozenset({"storage", "history", "onboarding", "gateway", "budget"})
 _ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "storage": frozenset({"data_dir", "busy_timeout_ms"}),
     "history": frozenset({"enabled", "retention_days", "max_context_turns"}),
     "onboarding": frozenset({"ask_intro_question"}),
+    "gateway": frozenset(
+        {"profile", "output_limit", "request_timeout_seconds", "pricing_file"}
+    ),
+    "budget": frozenset({"per_request_micro_usd", "cumulative_micro_usd"}),
 }
 _SECRET_TOKENS = (
     "api_key",
@@ -33,6 +37,10 @@ MIN_RETENTION_DAYS = 1
 MAX_RETENTION_DAYS = 3_650
 MIN_CONTEXT_TURNS = 1
 MAX_CONTEXT_TURNS = 100
+MIN_OUTPUT_LIMIT = 1
+MAX_OUTPUT_LIMIT = 1_000_000
+MIN_REQUEST_TIMEOUT_SECONDS = 1
+MAX_REQUEST_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,24 @@ class OnboardingSettings:
 
 
 @dataclass(frozen=True)
+class GatewaySettings:
+    """Validated settings under ``[gateway]``."""
+
+    profile: str = "sim-default"
+    output_limit: int = 1_024
+    request_timeout_seconds: int = 30
+    pricing_file: Path | None = None
+
+
+@dataclass(frozen=True)
+class BudgetSettings:
+    """Validated settings under ``[budget]``."""
+
+    per_request_micro_usd: int | None = None
+    cumulative_micro_usd: int | None = None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Resolved runtime configuration for Bunny.ai."""
 
@@ -68,6 +94,8 @@ class AppConfig:
     storage: StorageSettings = field(default_factory=StorageSettings)
     history: HistorySettings = field(default_factory=HistorySettings)
     onboarding: OnboardingSettings = field(default_factory=OnboardingSettings)
+    gateway: GatewaySettings = field(default_factory=GatewaySettings)
+    budget: BudgetSettings = field(default_factory=BudgetSettings)
 
 
 def default_config_dir() -> Path:
@@ -201,22 +229,42 @@ def _parse_toml_file(config_path: Path) -> dict[str, object]:
     return parsed
 
 
+def _require_non_negative_int_or_none(value: object, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"Setting '{field_name}' must be an integer.")
+    if value < 0:
+        raise ConfigError(f"Setting '{field_name}' must be non-negative.")
+    return value
+
+
+def _validate_table(parsed: dict[str, object], section: str) -> dict[str, object]:
+    raw = parsed.get(section, {})
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Section '[{section}]' must be a TOML table.")
+    for key in raw:
+        _check_not_secret_key(key)
+        if key not in _ALLOWED_KEYS[section]:
+            raise ConfigError(f"Unknown setting '{section}.{key}'.")
+    return raw
+
+
 def _validate_sections(
     parsed: dict[str, object], *, config_dir: Path
-) -> tuple[StorageSettings, HistorySettings, OnboardingSettings]:
+) -> tuple[
+    StorageSettings,
+    HistorySettings,
+    OnboardingSettings,
+    GatewaySettings,
+    BudgetSettings,
+]:
     for key in parsed:
         _check_not_secret_key(key)
         if key not in _ALLOWED_SECTIONS:
             raise ConfigError(f"Unknown configuration section '[{key}]'.")
 
-    storage_section = parsed.get("storage", {})
-    if not isinstance(storage_section, dict):
-        raise ConfigError("Section '[storage]' must be a TOML table.")
-    for key in storage_section:
-        _check_not_secret_key(key)
-        if key not in _ALLOWED_KEYS["storage"]:
-            raise ConfigError(f"Unknown setting 'storage.{key}'.")
-
+    storage_section = _validate_table(parsed, "storage")
     raw_data_dir = storage_section.get("data_dir")
     parsed_data_dir: Path | None = None
     if raw_data_dir is not None:
@@ -238,14 +286,7 @@ def _validate_sections(
         busy_timeout_ms=busy_timeout_ms,
     )
 
-    history_section = parsed.get("history", {})
-    if not isinstance(history_section, dict):
-        raise ConfigError("Section '[history]' must be a TOML table.")
-    for key in history_section:
-        _check_not_secret_key(key)
-        if key not in _ALLOWED_KEYS["history"]:
-            raise ConfigError(f"Unknown setting 'history.{key}'.")
-
+    history_section = _validate_table(parsed, "history")
     history_settings = HistorySettings(
         enabled=_require_bool(
             history_section.get("enabled", False), field_name="history.enabled"
@@ -264,14 +305,7 @@ def _validate_sections(
         ),
     )
 
-    onboarding_section = parsed.get("onboarding", {})
-    if not isinstance(onboarding_section, dict):
-        raise ConfigError("Section '[onboarding]' must be a TOML table.")
-    for key in onboarding_section:
-        _check_not_secret_key(key)
-        if key not in _ALLOWED_KEYS["onboarding"]:
-            raise ConfigError(f"Unknown setting 'onboarding.{key}'.")
-
+    onboarding_section = _validate_table(parsed, "onboarding")
     onboarding_settings = OnboardingSettings(
         ask_intro_question=_require_bool(
             onboarding_section.get("ask_intro_question", True),
@@ -279,7 +313,64 @@ def _validate_sections(
         )
     )
 
-    return storage_settings, history_settings, onboarding_settings
+    gateway_section = _validate_table(parsed, "gateway")
+    raw_profile = gateway_section.get("profile", "sim-default")
+    if not isinstance(raw_profile, str) or "\x00" in raw_profile:
+        raise ConfigError("Setting 'gateway.profile' must be a valid string.")
+    profile_name = raw_profile.strip()
+    if not profile_name:
+        raise ConfigError("Setting 'gateway.profile' must not be empty.")
+
+    raw_pricing_file = gateway_section.get("pricing_file")
+    parsed_pricing_file: Path | None = None
+    if raw_pricing_file is not None:
+        if not isinstance(raw_pricing_file, str):
+            raise ConfigError("Setting 'gateway.pricing_file' must be a string.")
+        pricing_candidate = _validate_path_string(
+            raw_pricing_file, label="gateway.pricing_file"
+        )
+        parsed_pricing_file = (
+            pricing_candidate
+            if pricing_candidate.is_absolute()
+            else (config_dir / pricing_candidate)
+        ).resolve()
+
+    gateway_settings = GatewaySettings(
+        profile=profile_name,
+        output_limit=_require_int_in_range(
+            gateway_section.get("output_limit", 1_024),
+            field_name="gateway.output_limit",
+            minimum=MIN_OUTPUT_LIMIT,
+            maximum=MAX_OUTPUT_LIMIT,
+        ),
+        request_timeout_seconds=_require_int_in_range(
+            gateway_section.get("request_timeout_seconds", 30),
+            field_name="gateway.request_timeout_seconds",
+            minimum=MIN_REQUEST_TIMEOUT_SECONDS,
+            maximum=MAX_REQUEST_TIMEOUT_SECONDS,
+        ),
+        pricing_file=parsed_pricing_file,
+    )
+
+    budget_section = _validate_table(parsed, "budget")
+    budget_settings = BudgetSettings(
+        per_request_micro_usd=_require_non_negative_int_or_none(
+            budget_section.get("per_request_micro_usd"),
+            field_name="budget.per_request_micro_usd",
+        ),
+        cumulative_micro_usd=_require_non_negative_int_or_none(
+            budget_section.get("cumulative_micro_usd"),
+            field_name="budget.cumulative_micro_usd",
+        ),
+    )
+
+    return (
+        storage_settings,
+        history_settings,
+        onboarding_settings,
+        gateway_settings,
+        budget_settings,
+    )
 
 
 def load_config(
@@ -330,13 +421,19 @@ def load_config(
 
     if resolved_config_path is not None:
         parsed = _parse_toml_file(resolved_config_path)
-        storage_settings, history_settings, onboarding_settings = _validate_sections(
-            parsed, config_dir=resolved_config_path.parent
-        )
+        (
+            storage_settings,
+            history_settings,
+            onboarding_settings,
+            gateway_settings,
+            budget_settings,
+        ) = _validate_sections(parsed, config_dir=resolved_config_path.parent)
     else:
         storage_settings = StorageSettings()
         history_settings = HistorySettings()
         onboarding_settings = OnboardingSettings()
+        gateway_settings = GatewaySettings()
+        budget_settings = BudgetSettings()
 
     if explicit_data_dir is not None:
         final_data_dir = explicit_data_dir
@@ -351,4 +448,6 @@ def load_config(
         storage=storage_settings,
         history=history_settings,
         onboarding=onboarding_settings,
+        gateway=gateway_settings,
+        budget=budget_settings,
     )

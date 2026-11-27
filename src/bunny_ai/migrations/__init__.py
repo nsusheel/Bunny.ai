@@ -6,7 +6,12 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from bunny_ai.migrations import m001_identity, m002_history, m003_memory
+from bunny_ai.migrations import (
+    m001_identity,
+    m002_history,
+    m003_memory,
+    m004_gateway_ledger,
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         description="User-controlled memory facts, settings and tombstones",
         apply=m003_memory.apply,
+    ),
+    Migration(
+        version=4,
+        description="Provider-neutral gateway budget policy, attempts and receipts",
+        apply=m004_gateway_ledger.apply,
     ),
 )
 

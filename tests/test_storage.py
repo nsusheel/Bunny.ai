@@ -163,7 +163,7 @@ def test_failed_migration_rolls_back_and_preserves_v1_data(
     storage.close()
 
     assert _sha256(db_path) == original_digest
-    assert list((data_dir / "backups").glob("bunny-pre-v3-*.sqlite3")) != []
+    assert list((data_dir / "backups").glob("bunny-pre-v4-*.sqlite3")) != []
 
 
 def test_corrupt_databases_preserve_bytes(tmp_path: Path) -> None:

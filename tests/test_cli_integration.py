@@ -407,7 +407,7 @@ def test_existing_v1_migration_and_failure_schema_preservation(
     assert migrated.returncode == 0, migrated.stderr
     assert _extract_identity(migrated.stdout) == v1_id
     assert "Preflight backup:" in migrated.stdout
-    assert list((v1_dir / "backups").glob("bunny-pre-v3-*.sqlite3")) != []
+    assert list((v1_dir / "backups").glob("bunny-pre-v4-*.sqlite3")) != []
 
     # 3. Corrupt DB, newer schema, unversioned foreign DB, and missing identity row.
     corrupt_dir = tmp_path / "corrupt"
@@ -531,7 +531,7 @@ def test_retention_pruning_cli_no_history_startup_and_readonly_status(
     )
     assert recent.returncode == 0, recent.stderr
     assert _extract_identity(recent.stdout) == expected_id
-    backups = list((data_dir / "backups").glob("bunny-pre-v3-*.sqlite3"))
+    backups = list((data_dir / "backups").glob("bunny-pre-v4-*.sqlite3"))
     assert len(backups) == 1
     backup_digest = _sha256(backups[0])
 

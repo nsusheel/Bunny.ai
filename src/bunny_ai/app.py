@@ -1,10 +1,22 @@
-"""Application orchestration for Awakening Stage 3."""
+"""Application orchestration for Awakening Stage 4."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
+from bunny_ai.budget import (
+    DEFAULT_PRICE_PROFILES,
+    PriceProfile,
+    load_pricing_file,
+)
 from bunny_ai.config import AppConfig
+from bunny_ai.gateway import (
+    ModelGateway,
+    compute_consent_snapshot,
+)
+from bunny_ai.ledger import BudgetLedger
 from bunny_ai.memory import MemoryStore
 from bunny_ai.neon import (
     SeedPersonality,
@@ -18,6 +30,9 @@ from bunny_ai.providers import (
     FakeProvider,
     ModelProvider,
     ProviderRequest,
+    ProviderTransport,
+    RequestOptions,
+    SimulatedTransport,
     TurnMessage,
 )
 from bunny_ai.storage import (
@@ -30,13 +45,21 @@ from bunny_ai.storage import (
 
 @dataclass(frozen=True)
 class TurnOutcome:
-    """Result of one simulated offline conversation turn."""
+    """Result of one gateway-enforced conversation turn."""
 
     reply: str
     mode: str
     history_turns_used: int
     persisted: bool
     facts_used: tuple[ContextFact, ...] = ()
+    status: str = "settled"
+    attempt_id: str = ""
+    reserved_micro_usd: int = 0
+    settled_micro_usd: int = 0
+    held_micro_usd: int = 0
+    overrun_micro_usd: int = 0
+    refusal_code: str | None = None
+    reason: str | None = None
 
 
 def run_demo(text: str) -> str:
@@ -62,6 +85,9 @@ class AwakeningSession:
         *,
         history_override: bool | None = None,
         provider: ModelProvider | None = None,
+        transport: ProviderTransport | None = None,
+        clock: Callable[[], datetime] | None = None,
+        price_profiles: Mapping[str, PriceProfile | None] | None = None,
     ) -> None:
         self.config = config
         self.history_enabled = (
@@ -72,6 +98,13 @@ class AwakeningSession:
         self.provider: ModelProvider = (
             provider if provider is not None else FakeProvider()
         )
+        self.transport: ProviderTransport = (
+            transport if transport is not None else SimulatedTransport(self.provider)
+        )
+        self._clock: Callable[[], datetime] = (
+            (lambda: datetime.now(UTC)) if clock is None else clock
+        )
+        self._price_profiles = price_profiles
         self.storage = LocalStorage(
             config.data_dir,
             busy_timeout_ms=config.storage.busy_timeout_ms,
@@ -79,6 +112,8 @@ class AwakeningSession:
         self._init_result: InitResult | None = None
         self._identity: IdentityRecord | None = None
         self._memory: MemoryStore | None = None
+        self._ledger: BudgetLedger | None = None
+        self._gateway: ModelGateway | None = None
         self._seen_floor: str | None = None
         self._history_session_id: str | None = None
         self._session_messages: list[TurnMessage] = []
@@ -107,6 +142,18 @@ class AwakeningSession:
         return self._identity
 
     @property
+    def ledger(self) -> BudgetLedger:
+        if self._ledger is None:
+            raise RuntimeError("AwakeningSession has not been opened.")
+        return self._ledger
+
+    @property
+    def gateway(self) -> ModelGateway:
+        if self._gateway is None:
+            raise RuntimeError("AwakeningSession has not been opened.")
+        return self._gateway
+
+    @property
     def restored_turn_count(self) -> int:
         return self._restored_turn_count
 
@@ -115,7 +162,7 @@ class AwakeningSession:
         return self._pruned_turn_count
 
     def open(self) -> InitResult:
-        """Initialize or load the local identity and optional prior turns."""
+        """Initialize or load the local identity, ledger, gateway, and prior turns."""
         result = self.storage.initialize_or_load(
             seed_version=self.personality.seed_version,
             style_version=self.personality.style_version,
@@ -123,6 +170,30 @@ class AwakeningSession:
         self._init_result = result
         self._identity = result.identity
         self._memory = MemoryStore(self.storage, result.identity.identity_id)
+        self._ledger = BudgetLedger(self.storage, result.identity.identity_id)
+
+        now_utc = self._clock()
+        self._ledger.check_and_reconcile_watermark(now_utc)
+        self._ledger.recover_stale_intents(now_utc)
+        self._ledger.sync_policy_from_config(self.config.budget, now_utc)
+
+        profiles: Mapping[str, PriceProfile | None]
+        if self._price_profiles is not None:
+            profiles = self._price_profiles
+        elif self.config.gateway.pricing_file is not None:
+            profiles = load_pricing_file(self.config.gateway.pricing_file)
+        else:
+            profiles = DEFAULT_PRICE_PROFILES
+
+        self._gateway = ModelGateway(
+            self.storage,
+            self._ledger,
+            self.transport,
+            price_profiles=profiles,
+            clock=self._clock,
+            request_timeout_seconds=float(self.config.gateway.request_timeout_seconds),
+        )
+
         self._seen_floor = self._memory.settings().context_floor
         if not result.is_first_launch:
             self._pruned_turn_count = self.storage.prune_expired_history(
@@ -167,7 +238,7 @@ class AwakeningSession:
             )
 
     def handle_turn(self, raw_text: str, *, from_intro: bool = False) -> TurnOutcome:
-        """Process one simulated turn and persist only if opt-in history is enabled."""
+        """Process one turn through the gateway and persist only on settled completion."""
         clean_input = validate_user_input(raw_text)
         if (
             from_intro
@@ -187,6 +258,7 @@ class AwakeningSession:
             self._session_messages.clear()
         context_history = tuple(self._session_messages[-max_messages:])
 
+        consent = compute_consent_snapshot(self.storage, self.identity.identity_id)
         request = ProviderRequest(
             identity_id=self.identity.identity_id,
             seed_version=self.personality.seed_version,
@@ -196,7 +268,33 @@ class AwakeningSession:
             user_input=clean_input,
             facts=selection.facts,
         )
-        response = self.provider.complete(request)
+        options = RequestOptions(max_output_tokens=self.config.gateway.output_limit)
+        prepared = self.gateway.prepare(
+            profile_id=self.config.gateway.profile,
+            request=request,
+            options=options,
+            consent=consent,
+        )
+        outcome = self.gateway.dispatch(prepared)
+
+        if outcome.status != "settled" or outcome.response is None:
+            return TurnOutcome(
+                reply="",
+                mode=self.config.gateway.profile,
+                history_turns_used=0,
+                persisted=False,
+                facts_used=(),
+                status=outcome.status,
+                attempt_id=outcome.attempt_id,
+                reserved_micro_usd=outcome.reserved_micro_usd,
+                settled_micro_usd=outcome.settled_micro_usd,
+                held_micro_usd=outcome.held_micro_usd,
+                overrun_micro_usd=outcome.overrun_micro_usd,
+                refusal_code=outcome.refusal_code,
+                reason=outcome.reason,
+            )
+
+        response = outcome.response
         safe_reply = sanitize_terminal_text(response.text)
         safe_persisted_reply = (
             sanitize_terminal_text(response.persisted_text)
@@ -231,6 +329,12 @@ class AwakeningSession:
             history_turns_used=response.history_turns_used,
             persisted=persisted,
             facts_used=selection.facts,
+            status="settled",
+            attempt_id=outcome.attempt_id,
+            reserved_micro_usd=outcome.reserved_micro_usd,
+            settled_micro_usd=outcome.settled_micro_usd,
+            held_micro_usd=outcome.held_micro_usd,
+            overrun_micro_usd=outcome.overrun_micro_usd,
         )
 
     @property
