@@ -260,3 +260,93 @@ def test_identity_is_unchanged_by_memory_operations(tmp_path: Path) -> None:
         chat.finish()
     again = _run_cli(["status", "--data-dir", str(data_dir)], env=env, cwd=tmp_path)
     assert _extract_identity(again.stdout) == identity
+
+
+def test_preferred_name_recall_across_restart_edit_disable_delete_without_transcript_copy(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "recall-profile"
+    with _start(tmp_path, data_dir, "--history") as chat:
+        chat.send("/skip")
+
+        # Before saving and after declining: no recall.
+        assert "I don't have a confirmed preferred name for you right now" in chat.send(
+            "What is my preferred name?"
+        )
+        chat.send(f"/remember name {NAME}")
+        assert "Not saved" in chat.send("n")
+        assert "I don't have a confirmed preferred name for you right now" in chat.send(
+            "What is my preferred name?"
+        )
+
+        # After confirming: visible recall in Bunny> reply.
+        chat.send(f"/remember name {NAME}")
+        chat.send("y")
+        recalled = chat.send("What is my preferred name?")
+        assert (
+            f"Bunny> [Offline simulated | seed-1] Your confirmed preferred name is {NAME}"
+            in recalled
+        )
+        assert f"Memory used this turn: preferred name = {NAME}" in recalled
+        assert chat.finish() == 0
+
+    # After restart: visible recall persists without re-prompting.
+    with _start(tmp_path, data_dir, "--history") as chat:
+        restarted = chat.send("What's my name?")
+        assert f"Your confirmed preferred name is {NAME}" in restarted
+        name_id = short_ids(chat.send("/memory"))[0]
+
+        # After correction in same open chat: immediately uses corrected name.
+        chat.send(f"/memory edit {name_id} Quillon")
+        chat.send("y")
+        corrected = chat.send("What should you call me?")
+        assert "Your confirmed preferred name is Quillon" in corrected
+        assert NAME not in corrected
+
+        # After disablement and re-enablement:
+        chat.send("/memory off")
+        disabled = chat.send("Who am I?")
+        assert "I don't have a confirmed preferred name for you right now" in disabled
+        assert "Quillon" not in disabled
+        assert "Memory used this turn" not in disabled
+        chat.send("/memory on")
+        restored = chat.send("Do you know my preferred name?")
+        assert "Your confirmed preferred name is Quillon" in restored
+
+        # After deletion in same open chat:
+        chat.send(f"/memory delete {name_id}")
+        deleted = chat.send("What is my preferred name?")
+        assert "I don't have a confirmed preferred name for you right now" in deleted
+        assert "Quillon" not in deleted
+        assert chat.finish() == 0
+
+    # After another restart post-deletion:
+    with _start(tmp_path, data_dir, "--history") as chat:
+        after_restart = chat.send("What is my preferred name?")
+        assert (
+            "I don't have a confirmed preferred name for you right now" in after_restart
+        )
+        assert "Quillon" not in after_restart
+        assert NAME not in after_restart
+        chat.finish()
+
+    # Verify saved transcripts never persisted a copy of either synthetic name.
+    conn = sqlite3.connect(str(data_dir / DB_FILENAME))
+    try:
+        assistant_texts = conn.execute("SELECT assistant_text FROM turns").fetchall()
+        assert len(assistant_texts) == 9
+        assert all(
+            NAME not in text and "Quillon" not in text for (text,) in assistant_texts
+        )
+        assert conn.execute("SELECT COUNT(*) FROM memory_facts").fetchone() == (0,)
+        tombstones = conn.execute(
+            "SELECT fact_id, deleted_at FROM memory_tombstones"
+        ).fetchall()
+        assert len(tombstones) == 1
+        assert all(
+            NAME not in str(cell) and "Quillon" not in str(cell)
+            for row in tombstones
+            for cell in row
+        )
+    finally:
+        conn.close()

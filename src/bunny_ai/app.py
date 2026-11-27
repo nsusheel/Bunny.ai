@@ -1,4 +1,4 @@
-"""Application orchestration for Awakening Stage 2."""
+"""Application orchestration for Awakening Stage 3."""
 
 from __future__ import annotations
 
@@ -198,9 +198,16 @@ class AwakeningSession:
         )
         response = self.provider.complete(request)
         safe_reply = sanitize_terminal_text(response.text)
+        safe_persisted_reply = (
+            sanitize_terminal_text(response.persisted_text)
+            if response.persisted_text is not None
+            else safe_reply
+        )
 
         self._session_messages.append(TurnMessage(role="user", content=clean_input))
-        self._session_messages.append(TurnMessage(role="assistant", content=safe_reply))
+        self._session_messages.append(
+            TurnMessage(role="assistant", content=safe_persisted_reply)
+        )
 
         persisted = False
         if self.history_enabled:
@@ -213,7 +220,7 @@ class AwakeningSession:
                 session_id=self._history_session_id,
                 turn_index=self._persisted_turn_index,
                 user_text=clean_input,
-                assistant_text=safe_reply,
+                assistant_text=safe_persisted_reply,
                 provider_mode=response.mode,
             )
             persisted = True

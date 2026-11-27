@@ -166,11 +166,10 @@ class MemoryStore:
 
     # -- reads -------------------------------------------------------------
 
-    def settings(self) -> MemorySettings:
-        rows = self._storage.query(
-            "SELECT enabled, context_floor FROM memory_settings",
-            context="read memory settings",
-        )
+    def _read_settings(self, conn: sqlite3.Connection) -> MemorySettings:
+        rows = conn.execute(
+            "SELECT enabled, context_floor FROM memory_settings"
+        ).fetchall()
         if not rows:
             raise StorageError("Memory settings row is missing; profile not changed.")
         floor = rows[0][1]
@@ -179,15 +178,22 @@ class MemoryStore:
             context_floor=None if floor is None else str(floor),
         )
 
-    def list_facts(self) -> tuple[MemoryFact, ...]:
-        rows = self._storage.query(
+    def _list_facts(self, conn: sqlite3.Connection) -> tuple[MemoryFact, ...]:
+        rows = conn.execute(
             f"SELECT {FACT_COLUMNS} FROM memory_facts WHERE identity_id = ? "
             "ORDER BY CASE category WHEN 'preferred_name' THEN 0 ELSE 1 END, "
             "created_at, fact_id",
             (self._identity_id,),
-            context="list memory facts",
-        )
-        return tuple(fact_from_row(row) for row in rows)
+        ).fetchall()
+        return tuple(fact_from_row(tuple(row)) for row in rows)
+
+    def settings(self) -> MemorySettings:
+        with self._storage.read_transaction("read memory settings") as conn:
+            return self._read_settings(conn)
+
+    def list_facts(self) -> tuple[MemoryFact, ...]:
+        with self._storage.read_transaction("list memory facts") as conn:
+            return self._list_facts(conn)
 
     def tombstones(self) -> dict[str, str]:
         rows = self._storage.query(
@@ -214,16 +220,17 @@ class MemoryStore:
         return matches[0]
 
     def load_context(self) -> tuple[MemorySettings, ContextSelection]:
-        """Read the live switch and facts for one turn (never cached)."""
-        settings = self.settings()
-        if not settings.enabled:
-            return settings, ContextSelection(facts=(), omitted=0)
-        return settings, select_context_facts(self.list_facts())
+        """Read the switch, context floor and facts from one consistent snapshot."""
+        with self._storage.read_transaction("load memory context") as conn:
+            settings = self._read_settings(conn)
+            if not settings.enabled:
+                return settings, ContextSelection(facts=(), omitted=0)
+            return settings, select_context_facts(self._list_facts(conn))
 
     # -- writes ------------------------------------------------------------
 
-    def _require_enabled(self) -> None:
-        if not self.settings().enabled:
+    def _require_enabled_in_tx(self, conn: sqlite3.Connection) -> None:
+        if not self._read_settings(conn).enabled:
             raise MemoryDisabledError(
                 "Memory is off. Turn it on with /memory on before saving or "
                 "correcting facts."
@@ -232,9 +239,9 @@ class MemoryStore:
     def save(self, category: Category, value: str) -> MemoryFact:
         """Save a confirmed fact; a preferred name replaces the previous one."""
         clean = validate_fact_value(value)
-        self._require_enabled()
-        now = utc_now_iso()
         with self._storage.transaction("save memory fact") as conn:
+            self._require_enabled_in_tx(conn)
+            now = utc_now_iso()
             existing = conn.execute(
                 f"SELECT {FACT_COLUMNS} FROM memory_facts WHERE identity_id = ?",
                 (self._identity_id,),
@@ -279,9 +286,9 @@ class MemoryStore:
     def correct(self, fact_id: str, value: str) -> MemoryFact:
         """Replace a fact's value after the user confirmed the correction."""
         clean = validate_fact_value(value)
-        self._require_enabled()
-        now = utc_now_iso()
         with self._storage.transaction("correct memory fact") as conn:
+            self._require_enabled_in_tx(conn)
+            now = utc_now_iso()
             self._get(conn, fact_id)
             conn.execute(
                 "UPDATE memory_facts SET value = ?, updated_at = ?, confirmed_at = ?, "
@@ -293,8 +300,8 @@ class MemoryStore:
 
     def delete(self, fact_id: str) -> None:
         """Delete one fact and keep only an id-only tombstone."""
-        now = utc_now_iso()
         with self._storage.transaction("delete memory fact") as conn:
+            now = utc_now_iso()
             self._get(conn, fact_id)
             conn.execute("DELETE FROM memory_facts WHERE fact_id = ?", (fact_id,))
             conn.execute(
@@ -306,8 +313,8 @@ class MemoryStore:
 
     def reset(self) -> int:
         """Delete every fact (memory switch and chat history are untouched)."""
-        now = utc_now_iso()
         with self._storage.transaction("reset memory") as conn:
+            now = utc_now_iso()
             rows = conn.execute(
                 "SELECT fact_id FROM memory_facts WHERE identity_id = ?",
                 (self._identity_id,),
@@ -325,8 +332,8 @@ class MemoryStore:
 
     def set_enabled(self, enabled: bool) -> None:
         """Switch memory use on or off; stored facts are kept either way."""
-        now = utc_now_iso()
         with self._storage.transaction("set memory switch") as conn:
+            now = utc_now_iso()
             conn.execute(
                 "UPDATE memory_settings SET enabled = ?, updated_at = ?",
                 (1 if enabled else 0, now),

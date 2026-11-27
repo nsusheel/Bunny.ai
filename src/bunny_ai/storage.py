@@ -688,6 +688,43 @@ class LocalStorage:
         return inspect_file(self.db_path, self.busy_timeout_ms)
 
     @contextmanager
+    def read_transaction(self, context: str) -> Iterator[sqlite3.Connection]:
+        """Run one consistent ``BEGIN DEFERRED`` read snapshot."""
+        conn = self._require_conn()
+        if conn.in_transaction:
+            # Already inside an outer transaction snapshot; reuse it cleanly.
+            try:
+                yield conn
+            except sqlite3.Error as exc:
+                raise _translate_sqlite_error(exc, context) from exc
+            return
+        deadline = time.monotonic() + (self.busy_timeout_ms / 1000.0)
+        while True:
+            try:
+                conn.execute("BEGIN DEFERRED")
+                break
+            except sqlite3.OperationalError as exc:
+                if _is_lock_error(exc):
+                    if time.monotonic() < deadline:
+                        time.sleep(0.01 + random.uniform(0.0, 0.02))
+                        continue
+                    raise DatabaseLockedError(
+                        "Database is currently locked by another process. "
+                        "Wait for the other process to finish and retry."
+                    ) from exc
+                raise StorageError(f"Failed to begin read transaction: {exc}") from exc
+        try:
+            yield conn
+        except sqlite3.Error as exc:
+            raise _translate_sqlite_error(exc, context) from exc
+        finally:
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+
+    @contextmanager
     def transaction(self, context: str) -> Iterator[sqlite3.Connection]:
         """Run one ``BEGIN IMMEDIATE`` transaction with rollback on any failure."""
         conn = self._require_conn()

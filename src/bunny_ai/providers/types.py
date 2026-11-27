@@ -47,6 +47,7 @@ class ProviderResponse:
     mode: str
     history_turns_used: int
     facts_used: int = 0
+    persisted_text: str | None = None
 
 
 class ModelProvider(Protocol):
