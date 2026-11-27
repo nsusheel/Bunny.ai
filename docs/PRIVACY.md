@@ -1,6 +1,12 @@
 # Privacy
 
 > **Status:** proposed design. Not yet implemented in this repository.
+>
+> **Implemented subset:** the offline CLI scaffold keeps explicit facts and optional
+> history in separate, separately deletable local plaintext SQLite tables and makes no
+> network requests. Exports and backups are unencrypted
+> ([PORTABILITY.md](PORTABILITY.md)). Provider disclosure, hosted retention and
+> encryption are not implemented.
 
 Bunny holds personal context, so privacy is a core product requirement. The design goal is
 not "everything stays local" - that would be false when a hosted model is used. The goal is

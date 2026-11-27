@@ -32,5 +32,6 @@ Bunny.ai is an open-source, hardware-independent, provider-agnostic personal ass
 | Decisions and open questions | docs/DECISIONS.md |
 | Milestones and exit criteria | docs/ROADMAP.md |
 | Memory, personality, first run | docs/MEMORY.md, docs/PERSONALITY.md, docs/AWAKENING.md |
+| Export, import, recovery (offline CLI) | docs/PORTABILITY.md |
 | Privacy and security model | docs/PRIVACY.md, SECURITY.md |
 | Contribution, conduct and licensing rules | CONTRIBUTING.md, CODE_OF_CONDUCT.md |

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from bunny_ai.migrations import m001_identity, m002_history
+from bunny_ai.migrations import m001_identity, m002_history, m003_memory
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=2,
         description="Opt-in local sessions and conversation turns",
         apply=m002_history.apply,
+    ),
+    Migration(
+        version=3,
+        description="User-controlled memory facts, settings and tombstones",
+        apply=m003_memory.apply,
     ),
 )
 

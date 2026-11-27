@@ -2,6 +2,7 @@
 
 from bunny_ai.providers.fake import FakeProvider
 from bunny_ai.providers.types import (
+    ContextFact,
     ModelProvider,
     ProviderRequest,
     ProviderResponse,
@@ -9,6 +10,7 @@ from bunny_ai.providers.types import (
 )
 
 __all__ = [
+    "ContextFact",
     "FakeProvider",
     "ModelProvider",
     "ProviderRequest",

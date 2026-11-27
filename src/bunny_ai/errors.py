@@ -39,3 +39,27 @@ class RecoveryRequiredError(StorageError):
 
 class DatabaseLockedError(StorageError):
     """Database or storage lock is held by another active process."""
+
+
+class PortabilityError(BunnyError):
+    """Base error for export and import; the profile was not changed."""
+
+    def __init__(self, message: str, problems: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.problems = problems
+
+
+class ExportError(PortabilityError):
+    """The export file could not be written safely."""
+
+
+class ImportValidationError(PortabilityError):
+    """The import file is malformed or violates the documented format."""
+
+
+class UnsupportedImportError(PortabilityError):
+    """The import file declares a format or version this build does not support."""
+
+
+class ImportConflictError(PortabilityError):
+    """The import conflicts with local data and was refused in full."""

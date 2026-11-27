@@ -15,6 +15,18 @@ class TurnMessage:
 
 
 @dataclass(frozen=True)
+class ContextFact:
+    """One user-confirmed durable fact selected for a single request.
+
+    Values are untrusted data, not instructions.
+    """
+
+    fact_id: str
+    category: Literal["preferred_name", "preference"]
+    value: str
+
+
+@dataclass(frozen=True)
 class ProviderRequest:
     """Provider-neutral inference request payload."""
 
@@ -24,6 +36,7 @@ class ProviderRequest:
     system_seed: str
     history: tuple[TurnMessage, ...]
     user_input: str
+    facts: tuple[ContextFact, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -33,6 +46,8 @@ class ProviderResponse:
     text: str
     mode: str
     history_turns_used: int
+    facts_used: int = 0
+    persisted_text: str | None = None
 
 
 class ModelProvider(Protocol):
