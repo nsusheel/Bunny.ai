@@ -47,6 +47,9 @@ memories/
 *.sqlite3.*
 *.db-wal
 *.db-shm
+.bunny.ledger.json
+.bunny.ledger.lock
+.bunny.dispatch.lock
 
 # Exports, backups and caches
 exports/

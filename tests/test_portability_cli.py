@@ -252,7 +252,7 @@ def test_stage2_profile_upgrades_and_accepts_matching_import(tmp_path: Path) -> 
     assert "Imported 1 new fact(s)" in result.stdout
     assert "Backup taken first:" in result.stdout
     assert list((twin / "backups").glob("bunny-pre-import-*.sqlite3"))
-    assert list((twin / "backups").glob("bunny-pre-v3-*.sqlite3"))
+    assert list((twin / "backups").glob("bunny-pre-v4-*.sqlite3"))
     conn = sqlite3.connect(str(twin / DB_FILENAME))
     try:
         assert conn.execute("SELECT user_text FROM turns").fetchall() == [

@@ -130,7 +130,12 @@ def smoke_test(wheel: Path) -> None:
             timeout=10,
             check=True,
         )
-        if "First launch" not in first.stdout or first.stderr:
+        if (
+            "First launch" not in first.stdout
+            or "Budget:" not in first.stdout
+            or "Turn spend:" not in first.stdout
+            or first.stderr
+        ):
             raise RuntimeError(f"Unexpected first-launch output:\n{first.stdout}")
         first_id = _extract_identity(first.stdout)
 
@@ -164,9 +169,60 @@ def smoke_test(wheel: Path) -> None:
         if (
             first_id not in post_status.stdout
             or "Saved turns: 0" not in post_status.stdout
+            or "Budget settled:" not in post_status.stdout
+            or "Dispatch status: ok" not in post_status.stdout
         ):
             raise RuntimeError(f"Unexpected post-status output:\n{post_status.stdout}")
-        print(f"Wheel smoke verified identity continuity: {first_id}")
+
+        budget_view = subprocess.run(
+            [str(bunny), "budget", "--data-dir", str(smoke_data)],
+            cwd=root,
+            env=run_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        if "Per-request cap:" not in budget_view.stdout or budget_view.stderr:
+            raise RuntimeError(f"Unexpected budget output:\n{budget_view.stdout}")
+
+        tight_cap = subprocess.run(
+            [
+                str(bunny),
+                "budget",
+                "set",
+                "--data-dir",
+                str(smoke_data),
+                "--per-request",
+                "10",
+            ],
+            cwd=root,
+            env=run_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        if "$0.000010" not in tight_cap.stdout or tight_cap.stderr:
+            raise RuntimeError(f"Unexpected budget set output:\n{tight_cap.stdout}")
+
+        refused = subprocess.run(
+            [str(bunny), "chat", "--data-dir", str(smoke_data), "-m", "Should refuse"],
+            cwd=root,
+            env=run_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if (
+            refused.returncode != 2
+            or "per_request_budget_exceeded" not in refused.stderr
+        ):
+            raise RuntimeError(
+                f"Expected budget refusal (rc=2), got rc={refused.returncode}:\n{refused.stderr}"
+            )
+        print(f"Wheel smoke verified identity & gateway budget enforcement: {first_id}")
 
 
 if __name__ == "__main__":

@@ -226,6 +226,12 @@ def run_recover(
     print(f"Restored identity {outcome.identity.identity_id} from {backup.name}.")
     if outcome.safety_copy is not None:
         print(f"Previous database preserved at: {outcome.safety_copy}")
+    if outcome.dispatch_blocked:
+        print(
+            "WARNING: Restored backup was older than recorded ledger state "
+            f"({outcome.ledger_reconciled_attempts} attempt(s) carried forward). "
+            "Dispatch is BLOCKED until reviewed (`bunny budget clear-review`)."
+        )
     print(DELETION_LIMITS)
     return 0
 

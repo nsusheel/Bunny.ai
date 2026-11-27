@@ -20,6 +20,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+from bunny_ai._watermark import (
+    LEDGER_LOCK_FILENAME,
+    LedgerWatermark,
+    has_stale_rollback,
+    merge_watermarks,
+    read_db_ledger_state,
+    read_watermark,
+    reconcile_db_with_watermark,
+    watermark_path,
+    write_watermark_atomic,
+)
 from bunny_ai.config import ensure_data_dir, restrict_path_permissions
 from bunny_ai.errors import (
     CorruptDatabaseError,
@@ -63,6 +74,20 @@ _REQUIRED_TABLES_BY_VERSION: dict[int, frozenset[str]] = {
             "memory_settings",
             "memory_facts",
             "memory_tombstones",
+        }
+    ),
+    4: frozenset(
+        {
+            "schema_migrations",
+            "identity",
+            "sessions",
+            "turns",
+            "memory_settings",
+            "memory_facts",
+            "memory_tombstones",
+            "budget_policy",
+            "gateway_attempts",
+            "gateway_receipts",
         }
     ),
 }
@@ -118,6 +143,15 @@ class StorageSnapshot:
     turn_count: int = 0
     fact_count: int = 0
     memory_enabled: bool | None = None
+    per_request_micro_usd: int | None = None
+    cumulative_micro_usd: int | None = None
+    settled_micro_usd: int = 0
+    held_micro_usd: int = 0
+    available_micro_usd: int | None = None
+    dispatch_blocked: bool = False
+    block_reason: str | None = None
+    attempt_count: int = 0
+    uncertain_hold_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,6 +162,8 @@ class RestoreResult:
     safety_copy: Path | None
     identity: IdentityRecord
     schema_version: int
+    ledger_reconciled_attempts: int = 0
+    dispatch_blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,50 +280,38 @@ def _begin_immediate(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
 
 
 @contextmanager
-def _acquire_init_lock(data_dir: Path, busy_timeout_ms: int) -> Iterator[None]:
-    """Serialize fresh initialization and migration across concurrent processes."""
-    ensure_data_dir(data_dir)
-    lock_path = data_dir / LOCK_FILENAME
+def acquire_exclusive_file_lock(
+    lock_path: Path, busy_timeout_ms: int
+) -> Iterator[None]:
+    """Acquire an exclusive OS file lock on ``lock_path`` with bounded retry."""
+    ensure_data_dir(lock_path.parent)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    restrict_path_permissions(lock_path, is_dir=False)
     deadline = time.monotonic() + (busy_timeout_ms / 1000.0)
     locked = False
     try:
+        restrict_path_permissions(lock_path, is_dir=False)
         while True:
-            try:
-                if sys.platform == "win32":
-                    import msvcrt
-
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _try_lock_fd(fd, exclusive=True):
                 locked = True
                 break
-            except OSError as exc:
-                if time.monotonic() >= deadline:
-                    raise DatabaseLockedError(
-                        f"Timed out waiting for storage lock '{lock_path}': {exc}"
-                    ) from exc
-                time.sleep(0.01 + random.uniform(0.0, 0.02))
+            if time.monotonic() >= deadline:
+                raise DatabaseLockedError(
+                    f"Timed out waiting for storage lock '{lock_path}'."
+                )
+            time.sleep(0.01 + random.uniform(0.0, 0.02))
         yield
     finally:
         if locked:
-            try:
-                if sys.platform == "win32":
-                    import msvcrt
+            _unlock_fd(fd)
+        else:
+            os.close(fd)
 
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
 
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-        os.close(fd)
+@contextmanager
+def _acquire_init_lock(data_dir: Path, busy_timeout_ms: int) -> Iterator[None]:
+    """Serialize fresh initialization and migration across concurrent processes."""
+    with acquire_exclusive_file_lock(data_dir / LOCK_FILENAME, busy_timeout_ms):
+        yield
 
 
 class _OVERLAPPED(ctypes.Structure):
@@ -555,6 +579,16 @@ def inspect_file(db_path: Path, busy_timeout_ms: int) -> StorageSnapshot:
     )
     fact_count = 0
     memory_enabled: bool | None = None
+    per_request_micro_usd: int | None = None
+    cumulative_micro_usd: int | None = None
+    settled_micro_usd = 0
+    held_micro_usd = 0
+    available_micro_usd: int | None = None
+    dispatch_blocked = False
+    block_reason: str | None = None
+    attempt_count = 0
+    uncertain_hold_count = 0
+
     if schema_version >= 3:
         conn = _open_ro(db_path, busy_timeout_ms)
         try:
@@ -563,9 +597,46 @@ def inspect_file(db_path: Path, busy_timeout_ms: int) -> StorageSnapshot:
             )
             row = conn.execute("SELECT enabled FROM memory_settings").fetchone()
             memory_enabled = bool(row[0]) if row is not None else None
+            if schema_version >= 4:
+                policy = conn.execute(
+                    """
+                    SELECT per_request_micro_usd, cumulative_micro_usd,
+                           dispatch_blocked, block_reason
+                    FROM budget_policy WHERE singleton = 1
+                    """
+                ).fetchone()
+                if policy is None:
+                    raise CorruptDatabaseError(
+                        f"Database '{db_path}' is missing budget_policy row."
+                    )
+                per_request_micro_usd = None if policy[0] is None else int(policy[0])
+                cumulative_micro_usd = None if policy[1] is None else int(policy[1])
+                dispatch_blocked = bool(policy[2])
+                block_reason = None if policy[3] is None else str(policy[3])
+                agg = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(settled_micro_usd), 0),
+                        COALESCE(SUM(held_micro_usd), 0),
+                        COUNT(*),
+                        COALESCE(SUM(CASE WHEN state = 'uncertain_hold' THEN 1 ELSE 0 END), 0)
+                    FROM gateway_attempts
+                    WHERE identity_id = ?
+                    """,
+                    (identity.identity_id,),
+                ).fetchone()
+                if agg is not None:
+                    settled_micro_usd = int(agg[0])
+                    held_micro_usd = int(agg[1])
+                    attempt_count = int(agg[2])
+                    uncertain_hold_count = int(agg[3])
+                if cumulative_micro_usd is not None:
+                    available_micro_usd = max(
+                        0, cumulative_micro_usd - settled_micro_usd - held_micro_usd
+                    )
         except sqlite3.Error as exc:
             raise CorruptDatabaseError(
-                f"Database '{db_path}' memory tables are unreadable: {exc}."
+                f"Database '{db_path}' metadata tables are unreadable: {exc}."
             ) from exc
         finally:
             conn.close()
@@ -578,6 +649,15 @@ def inspect_file(db_path: Path, busy_timeout_ms: int) -> StorageSnapshot:
         turn_count=turn_count,
         fact_count=fact_count,
         memory_enabled=memory_enabled,
+        per_request_micro_usd=per_request_micro_usd,
+        cumulative_micro_usd=cumulative_micro_usd,
+        settled_micro_usd=settled_micro_usd,
+        held_micro_usd=held_micro_usd,
+        available_micro_usd=available_micro_usd,
+        dispatch_blocked=dispatch_blocked,
+        block_reason=block_reason,
+        attempt_count=attempt_count,
+        uncertain_hold_count=uncertain_hold_count,
     )
 
 
@@ -685,7 +765,95 @@ class LocalStorage:
         """Inspect local database state read-only without creating files."""
         if not self.db_path.exists():
             return StorageSnapshot(exists=False, db_path=self.db_path)
-        return inspect_file(self.db_path, self.busy_timeout_ms)
+        snapshot = inspect_file(self.db_path, self.busy_timeout_ms)
+        if snapshot.identity is None or not watermark_path(self.data_dir).exists():
+            return snapshot
+        wm = read_watermark(self.data_dir)
+        if wm is None:
+            return snapshot
+        if wm.identity_id != snapshot.identity.identity_id:
+            return StorageSnapshot(
+                exists=snapshot.exists,
+                db_path=snapshot.db_path,
+                schema_version=snapshot.schema_version,
+                identity=snapshot.identity,
+                session_count=snapshot.session_count,
+                turn_count=snapshot.turn_count,
+                fact_count=snapshot.fact_count,
+                memory_enabled=snapshot.memory_enabled,
+                per_request_micro_usd=snapshot.per_request_micro_usd,
+                cumulative_micro_usd=snapshot.cumulative_micro_usd,
+                settled_micro_usd=snapshot.settled_micro_usd,
+                held_micro_usd=snapshot.held_micro_usd,
+                available_micro_usd=snapshot.available_micro_usd,
+                dispatch_blocked=True,
+                block_reason="ledger_watermark_identity_mismatch",
+                attempt_count=snapshot.attempt_count,
+                uncertain_hold_count=snapshot.uncertain_hold_count,
+            )
+
+        if snapshot.schema_version is not None and snapshot.schema_version >= 4:
+            conn = _open_ro(self.db_path, self.busy_timeout_ms)
+            try:
+                db_state = read_db_ledger_state(conn, snapshot.identity.identity_id)
+            finally:
+                conn.close()
+            if not has_stale_rollback(db_state, wm):
+                return snapshot
+            merged = merge_watermarks(db_state, wm)
+            settled = sum(a.settled_micro_usd for a in merged.attempts)
+            held = sum(a.held_micro_usd for a in merged.attempts)
+            uncertain = sum(1 for a in merged.attempts if a.state == "uncertain_hold")
+            cum = snapshot.cumulative_micro_usd
+            avail = max(0, cum - settled - held) if cum is not None else None
+            return StorageSnapshot(
+                exists=snapshot.exists,
+                db_path=snapshot.db_path,
+                schema_version=snapshot.schema_version,
+                identity=snapshot.identity,
+                session_count=snapshot.session_count,
+                turn_count=snapshot.turn_count,
+                fact_count=snapshot.fact_count,
+                memory_enabled=snapshot.memory_enabled,
+                per_request_micro_usd=snapshot.per_request_micro_usd,
+                cumulative_micro_usd=cum,
+                settled_micro_usd=settled,
+                held_micro_usd=held,
+                available_micro_usd=avail,
+                dispatch_blocked=True,
+                block_reason=wm.block_reason
+                or "stale_backup_detected_reconcile_required",
+                attempt_count=max(snapshot.attempt_count, len(merged.attempts)),
+                uncertain_hold_count=uncertain,
+            )
+
+        if wm.highest_attempt_seq > 0 or wm.attempts or wm.dispatch_blocked:
+            settled = sum(a.settled_micro_usd for a in wm.attempts)
+            held = sum(a.held_micro_usd for a in wm.attempts)
+            uncertain = sum(1 for a in wm.attempts if a.state == "uncertain_hold")
+            cum = wm.cumulative_micro_usd
+            avail = max(0, cum - settled - held) if cum is not None else None
+            return StorageSnapshot(
+                exists=snapshot.exists,
+                db_path=snapshot.db_path,
+                schema_version=snapshot.schema_version,
+                identity=snapshot.identity,
+                session_count=snapshot.session_count,
+                turn_count=snapshot.turn_count,
+                fact_count=snapshot.fact_count,
+                memory_enabled=snapshot.memory_enabled,
+                per_request_micro_usd=wm.per_request_micro_usd,
+                cumulative_micro_usd=cum,
+                settled_micro_usd=settled,
+                held_micro_usd=held,
+                available_micro_usd=avail,
+                dispatch_blocked=True,
+                block_reason=wm.block_reason
+                or "stale_backup_detected_reconcile_required",
+                attempt_count=len(wm.attempts),
+                uncertain_hold_count=uncertain,
+            )
+        return snapshot
 
     @contextmanager
     def read_transaction(self, context: str) -> Iterator[sqlite3.Connection]:
@@ -774,13 +942,60 @@ class LocalStorage:
             )
         return tuple(infos)
 
+    def _merge_live_watermark(
+        self, identity_id: str, live_schema_version: int | None
+    ) -> LedgerWatermark | None:
+        has_wm = watermark_path(self.data_dir).exists()
+        has_live_v4 = (
+            self.db_path.exists()
+            and live_schema_version is not None
+            and live_schema_version >= 4
+        )
+        if not has_wm and not has_live_v4:
+            return None
+        if not has_wm and has_live_v4:
+            conn = _open_ro(self.db_path, self.busy_timeout_ms)
+            try:
+                live_state = read_db_ledger_state(conn, identity_id)
+            finally:
+                conn.close()
+            if (
+                not live_state.attempts
+                and not live_state.dispatch_blocked
+                and live_state.highest_attempt_seq == 0
+            ):
+                return None
+
+        with acquire_exclusive_file_lock(
+            self.data_dir / LEDGER_LOCK_FILENAME, self.busy_timeout_ms
+        ):
+            wm = read_watermark(self.data_dir)
+            merged: LedgerWatermark | None = wm
+            if has_live_v4:
+                conn = _open_ro(self.db_path, self.busy_timeout_ms)
+                try:
+                    live_state = read_db_ledger_state(conn, identity_id)
+                finally:
+                    conn.close()
+                if wm is not None:
+                    merged = merge_watermarks(live_state, wm)
+                elif (
+                    live_state.attempts
+                    or live_state.dispatch_blocked
+                    or live_state.highest_attempt_seq > 0
+                ):
+                    merged = live_state
+            if merged is not None:
+                write_watermark_atomic(self.data_dir, merged)
+            return merged
+
     def restore_from_backup(self, backup_path: Path) -> RestoreResult:
         """Replace the profile database with a validated backup.
 
         The current database (readable or not) is first preserved in
         ``backups/``. A backup that belongs to a different identity is refused.
-        Anything written after the backup was taken is lost from the live
-        profile and survives only in the safety copy.
+        Any ledger attempts, holds, or blocks newer than the backup are carried
+        forward and dispatch is blocked until reviewed.
         """
         with _acquire_init_lock(self.data_dir, self.busy_timeout_ms):
             with self._acquire_session_exclusive():
@@ -789,6 +1004,7 @@ class LocalStorage:
                     raise StorageError(
                         f"Backup '{backup_path}' has no usable identity."
                     )
+                current: StorageSnapshot | None = None
                 current_damaged = False
                 if self.db_path.exists():
                     try:
@@ -805,12 +1021,19 @@ class LocalStorage:
                             "Backup belongs to a different Bunny identity than this "
                             "profile; refusing to replace it. Use a fresh --data-dir."
                         )
+                merged_watermark = self._merge_live_watermark(
+                    snap.identity.identity_id,
+                    current.schema_version if current is not None else None,
+                )
                 safety_copy = self._preserve_current_database(damaged=current_damaged)
                 staging = (
                     self.data_dir / f".{DB_FILENAME}.restore-{uuid.uuid4().hex[:8]}.tmp"
                 )
                 src_conn: sqlite3.Connection | None = None
                 dst_conn: sqlite3.Connection | None = None
+                stg_conn: sqlite3.Connection | None = None
+                reconciled_attempts = 0
+                dispatch_blocked = False
                 try:
                     src_conn = _open_ro(backup_path, self.busy_timeout_ms)
                     dst_conn = sqlite3.connect(str(staging), isolation_level=None)
@@ -821,6 +1044,60 @@ class LocalStorage:
                     src_conn = None
                     restrict_path_permissions(staging, is_dir=False)
                     inspect_file(staging, self.busy_timeout_ms)
+
+                    if merged_watermark is not None:
+                        if snap.schema_version >= 4:
+                            stg_conn = _open_rw(staging, self.busy_timeout_ms)
+                            _begin_immediate(stg_conn, self.busy_timeout_ms)
+                            stale, reconciled_attempts, final_wm = (
+                                reconcile_db_with_watermark(
+                                    stg_conn,
+                                    snap.identity.identity_id,
+                                    merged_watermark,
+                                    block_reason="stale_backup_restored_reconcile_required",
+                                    now_iso=_utc_now_iso(),
+                                )
+                            )
+                            if stale:
+                                stg_conn.execute("COMMIT")
+                                dispatch_blocked = True
+                                with acquire_exclusive_file_lock(
+                                    self.data_dir / LEDGER_LOCK_FILENAME,
+                                    self.busy_timeout_ms,
+                                ):
+                                    write_watermark_atomic(self.data_dir, final_wm)
+                            else:
+                                stg_conn.execute("ROLLBACK")
+                                dispatch_blocked = final_wm.dispatch_blocked
+                            stg_conn.close()
+                            stg_conn = None
+                            inspect_file(staging, self.busy_timeout_ms)
+                        elif (
+                            merged_watermark.highest_attempt_seq > 0
+                            or merged_watermark.attempts
+                            or merged_watermark.dispatch_blocked
+                        ):
+                            reconciled_attempts = len(merged_watermark.attempts)
+                            dispatch_blocked = True
+                            now_iso = _utc_now_iso()
+                            blocked_wm = LedgerWatermark(
+                                identity_id=merged_watermark.identity_id,
+                                highest_attempt_seq=merged_watermark.highest_attempt_seq,
+                                per_request_micro_usd=merged_watermark.per_request_micro_usd,
+                                cumulative_micro_usd=merged_watermark.cumulative_micro_usd,
+                                dispatch_blocked=True,
+                                block_reason="stale_backup_restored_reconcile_required",
+                                block_attempt_id=merged_watermark.block_attempt_id,
+                                attempts=merged_watermark.attempts,
+                                receipts=merged_watermark.receipts,
+                                updated_at=now_iso,
+                            )
+                            with acquire_exclusive_file_lock(
+                                self.data_dir / LEDGER_LOCK_FILENAME,
+                                self.busy_timeout_ms,
+                            ):
+                                write_watermark_atomic(self.data_dir, blocked_wm)
+
                     journal = _journal_path(self.db_path)
                     if journal.exists():
                         journal.unlink()
@@ -834,8 +1111,13 @@ class LocalStorage:
                         f"'{safety_copy}': {exc}"
                     ) from exc
                 finally:
-                    for conn in (dst_conn, src_conn):
+                    for conn in (stg_conn, dst_conn, src_conn):
                         if conn is not None:
+                            try:
+                                if conn.in_transaction:
+                                    conn.execute("ROLLBACK")
+                            except sqlite3.Error:
+                                pass
                             conn.close()
                     if staging.exists():
                         staging.unlink()
@@ -844,6 +1126,8 @@ class LocalStorage:
                     safety_copy=safety_copy,
                     identity=snap.identity,
                     schema_version=snap.schema_version,
+                    ledger_reconciled_attempts=reconciled_attempts,
+                    dispatch_blocked=dispatch_blocked,
                 )
 
     def _preserve_current_database(self, *, damaged: bool) -> Path | None:

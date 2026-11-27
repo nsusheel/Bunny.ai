@@ -63,3 +63,31 @@ class UnsupportedImportError(PortabilityError):
 
 class ImportConflictError(PortabilityError):
     """The import conflicts with local data and was refused in full."""
+
+
+class GatewayError(BunnyError):
+    """Base error for provider-neutral gateway, pricing, and ledger failures."""
+
+    def __init__(self, message: str, *, refusal_code: str | None = None) -> None:
+        super().__init__(message)
+        self.refusal_code = refusal_code
+
+
+class PricingError(GatewayError):
+    """Missing, incomplete, expired, or mismatched pricing metadata."""
+
+
+class BudgetError(GatewayError):
+    """Pre-flight budget policy refused the request before transport dispatch."""
+
+
+class DispatchBlockedError(GatewayError):
+    """Profile dispatch is blocked pending operator reconciliation or review."""
+
+
+class NotDispatchedError(GatewayError):
+    """Transport confirmed the request was not sent to any upstream provider."""
+
+
+class TransportUncertainError(GatewayError):
+    """Transport outcome is uncertain; reservation must be held until reconciled."""

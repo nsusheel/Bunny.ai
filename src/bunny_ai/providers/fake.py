@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import re
+import uuid
 
-from bunny_ai.providers.types import ProviderRequest, ProviderResponse
+from bunny_ai.providers.types import (
+    ModelProvider,
+    ProviderDispatchRequest,
+    ProviderReceipt,
+    ProviderRequest,
+    ProviderResponse,
+    UsageMetering,
+)
 
 _NAME_QUESTION_RE = re.compile(
     r"\b(?:"
@@ -87,4 +95,63 @@ class FakeProvider:
             mode=self.mode,
             history_turns_used=history_turns,
             facts_used=fact_count,
+        )
+
+
+class SimulatedTransport:
+    """Offline simulated transport wrapping a local ``ModelProvider``."""
+
+    def __init__(self, provider: ModelProvider | None = None) -> None:
+        self.provider: ModelProvider = (
+            provider if provider is not None else FakeProvider()
+        )
+        self.call_count: int = 0
+        self.dispatched_requests: list[ProviderDispatchRequest] = []
+
+    @property
+    def requests(self) -> list[ProviderDispatchRequest]:
+        """Alias for ``dispatched_requests``."""
+        return self.dispatched_requests
+
+    def send(self, dispatch_request: ProviderDispatchRequest) -> ProviderReceipt:
+        """Execute one simulated dispatch and return a deterministic receipt."""
+        self.call_count += 1
+        self.dispatched_requests.append(dispatch_request)
+        req = dispatch_request.request
+        response = self.provider.complete(req)
+
+        input_bytes = (
+            len(req.system_seed.encode("utf-8"))
+            + len(req.user_input.encode("utf-8"))
+            + sum(
+                len(msg.role.encode("utf-8")) + len(msg.content.encode("utf-8"))
+                for msg in req.history
+            )
+            + sum(
+                len(fact.category.encode("utf-8")) + len(fact.value.encode("utf-8"))
+                for fact in req.facts
+            )
+        )
+        uncached_input_tokens = ((input_bytes + 3) // 4) + 32
+        output_bytes = len(response.text.encode("utf-8"))
+        max_out = max(0, dispatch_request.options.max_output_tokens)
+        raw_output_tokens = max(1, (output_bytes + 3) // 4)
+        output_tokens = min(max_out, raw_output_tokens) if max_out > 0 else 0
+
+        usage = UsageMetering(
+            uncached_input_tokens=uncached_input_tokens,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            output_tokens=output_tokens,
+            reasoning_tokens=0,
+            model_id=dispatch_request.model_id,
+            tier=dispatch_request.tier,
+        )
+        return ProviderReceipt(
+            receipt_id=f"sim-rcpt-{uuid.uuid4().hex}",
+            attempt_id=dispatch_request.attempt_id,
+            response=response,
+            usage=usage,
+            complete=True,
+            finish_reason="completed",
         )
