@@ -1,6 +1,12 @@
 # Memory
 
 > **Status:** proposed design. Not yet implemented in this repository.
+>
+> **Implemented subset:** the offline CLI scaffold stores only explicit, user-confirmed
+> facts (`preferred_name` and `preference`) and supports inspect, correct, delete, reset,
+> disable, bounded retrieval and a versioned unencrypted export/import. Inference,
+> embeddings, summaries, hosted providers and encryption are not implemented. See
+> [PORTABILITY.md](PORTABILITY.md).
 
 Bunny's memory is local-first, inspectable and user-controlled. Memory is what allows
 Bunny to grow, but it is also the most sensitive part of the system. The design therefore

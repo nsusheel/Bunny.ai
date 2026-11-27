@@ -1,8 +1,10 @@
+import errno
 import hashlib
 import os
 import sqlite3
 import subprocess
 import sys
+import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,7 +28,14 @@ from bunny_ai.errors import (
     StorageError,
 )
 from bunny_ai.migrations import CURRENT_SCHEMA_VERSION, m001_identity
-from bunny_ai.storage import DB_FILENAME, INIT_STAGING_PREFIX, LocalStorage
+from bunny_ai.storage import (
+    DB_FILENAME,
+    INIT_STAGING_PREFIX,
+    SESSION_LOCK_FILENAME,
+    LocalStorage,
+    _try_lock_fd,
+    _unlock_fd,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -154,7 +163,7 @@ def test_failed_migration_rolls_back_and_preserves_v1_data(
     storage.close()
 
     assert _sha256(db_path) == original_digest
-    assert list((data_dir / "backups").glob("bunny-pre-v2-*.sqlite3")) != []
+    assert list((data_dir / "backups").glob("bunny-pre-v3-*.sqlite3")) != []
 
 
 def test_corrupt_databases_preserve_bytes(tmp_path: Path) -> None:
@@ -695,3 +704,105 @@ def test_lock_contention_raises_database_locked_error(tmp_path: Path) -> None:
     loaded = after.initialize_or_load(seed_version="seed-1", style_version="style-1")
     after.close()
     assert loaded.identity.identity_id == init.identity.identity_id
+
+
+def test_session_locks_allow_concurrent_sessions_and_block_restore_until_all_close(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "session-lock"
+    storage_a = LocalStorage(data_dir)
+    storage_b = LocalStorage(data_dir)
+    backup: Path | None = None
+    try:
+        init_a = storage_a.initialize_or_load(
+            seed_version="seed-1", style_version="style-1"
+        )
+        backup = storage_a.create_backup("manual")
+        init_b = storage_b.initialize_or_load(
+            seed_version="seed-1", style_version="style-1"
+        )
+        assert init_b.identity.identity_id == init_a.identity.identity_id
+        assert (data_dir / SESSION_LOCK_FILENAME).is_file()
+        assert storage_a._session_lock_fd is not None
+        assert storage_b._session_lock_fd is not None
+
+        # Calling _acquire_session_shared again on an open instance is a no-op.
+        held_fd = storage_a._session_lock_fd
+        storage_a._acquire_session_shared()
+        assert storage_a._session_lock_fd == held_fd
+
+        with pytest.raises(DatabaseLockedError, match="Close active `bunny chat`"):
+            LocalStorage(data_dir).restore_from_backup(backup)
+
+        storage_a.close()
+        storage_a.close()  # idempotent
+        assert storage_a._session_lock_fd is None
+
+        # Still blocked while storage_b remains open.
+        with pytest.raises(DatabaseLockedError, match="Close active `bunny chat`"):
+            LocalStorage(data_dir).restore_from_backup(backup)
+
+        storage_b.close()
+        assert storage_b._session_lock_fd is None
+    finally:
+        storage_b.close()
+        storage_a.close()
+
+    assert backup is not None
+    restored = LocalStorage(data_dir).restore_from_backup(backup)
+    assert restored.identity.identity_id == init_a.identity.identity_id
+
+
+def test_posix_session_lock_helpers_via_monkeypatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_file = tmp_path / "posix.lock"
+    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    calls: list[tuple[int, int]] = []
+    raise_mode: list[OSError | None] = [None]
+
+    def _fake_flock(target_fd: int, op: int) -> None:
+        calls.append((target_fd, op))
+        if raise_mode[0] is not None:
+            raise raise_mode[0]
+
+    fake_fcntl = types.SimpleNamespace(
+        LOCK_SH=1,
+        LOCK_EX=2,
+        LOCK_NB=4,
+        LOCK_UN=8,
+        flock=_fake_flock,
+    )
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+    monkeypatch.setattr("bunny_ai.storage.sys.platform", "linux")
+
+    closed = False
+    try:
+        assert _try_lock_fd(fd, exclusive=False) is True
+        assert _try_lock_fd(fd, exclusive=True) is True
+
+        raise_mode[0] = BlockingIOError(
+            errno.EAGAIN, "Resource temporarily unavailable"
+        )
+        assert _try_lock_fd(fd, exclusive=True) is False
+
+        raise_mode[0] = OSError(errno.EINVAL, "Bad file descriptor")
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            _try_lock_fd(fd, exclusive=False)
+
+        raise_mode[0] = None
+        _unlock_fd(fd)
+        closed = True
+    finally:
+        if not closed:
+            os.close(fd)
+
+    assert calls == [
+        (fd, 1 | 4),
+        (fd, 2 | 4),
+        (fd, 2 | 4),
+        (fd, 1 | 4),
+        (fd, 8),
+    ]
+    with pytest.raises(OSError):
+        os.fstat(fd)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import random
 import re
@@ -11,7 +13,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,6 +36,15 @@ from bunny_ai.migrations import CURRENT_SCHEMA_VERSION, MIGRATIONS
 SQLITE_HEADER = b"SQLite format 3\x00"
 DB_FILENAME = "bunny.sqlite3"
 LOCK_FILENAME = ".bunny.lock"
+SESSION_LOCK_FILENAME = ".bunny.session.lock"
+_LOCKFILE_FAIL_IMMEDIATELY = 0x1
+_LOCKFILE_EXCLUSIVE_LOCK = 0x2
+_ERROR_LOCK_VIOLATION = 33
+_RECOVERABLE_DAMAGE_ERRORS = (
+    CorruptDatabaseError,
+    MissingIdentityError,
+    RecoveryRequiredError,
+)
 INIT_STAGING_PREFIX = f".{DB_FILENAME}.init-"
 _INIT_STAGING_FILENAME_RE = re.compile(
     rf"{re.escape(INIT_STAGING_PREFIX)}[0-9a-f]{{8}}\.tmp(?:-journal)?",
@@ -43,6 +54,17 @@ _INIT_STAGING_FILENAME_RE = re.compile(
 _REQUIRED_TABLES_BY_VERSION: dict[int, frozenset[str]] = {
     1: frozenset({"schema_migrations", "identity"}),
     2: frozenset({"schema_migrations", "identity", "sessions", "turns"}),
+    3: frozenset(
+        {
+            "schema_migrations",
+            "identity",
+            "sessions",
+            "turns",
+            "memory_settings",
+            "memory_facts",
+            "memory_tombstones",
+        }
+    ),
 }
 
 OnboardingState = Literal["greeted", "answered", "skipped"]
@@ -94,6 +116,30 @@ class StorageSnapshot:
     identity: IdentityRecord | None = None
     session_count: int = 0
     turn_count: int = 0
+    fact_count: int = 0
+    memory_enabled: bool | None = None
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    """Outcome of restoring a local backup over the profile database."""
+
+    restored_from: Path
+    safety_copy: Path | None
+    identity: IdentityRecord
+    schema_version: int
+
+
+@dataclass(frozen=True)
+class BackupInfo:
+    """Read-only description of one file in the profile ``backups`` folder."""
+
+    path: Path
+    schema_version: int | None
+    identity_id: str | None
+    turn_count: int
+    fact_count: int
+    problem: str | None = None
 
 
 def _utc_now_iso() -> str:
@@ -241,6 +287,89 @@ def _acquire_init_lock(data_dir: Path, busy_timeout_ms: int) -> Iterator[None]:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
+        os.close(fd)
+
+
+class _OVERLAPPED(ctypes.Structure):
+    _fields_ = [
+        ("Internal", ctypes.c_size_t),
+        ("InternalHigh", ctypes.c_size_t),
+        ("Offset", ctypes.c_uint32),
+        ("OffsetHigh", ctypes.c_uint32),
+        ("hEvent", ctypes.c_void_p),
+    ]
+
+
+if sys.platform == "win32":
+
+    def _win32_kernel32() -> ctypes.WinDLL:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LockFileEx.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(_OVERLAPPED),
+        ]
+        kernel32.LockFileEx.restype = ctypes.c_int
+        kernel32.UnlockFileEx.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(_OVERLAPPED),
+        ]
+        kernel32.UnlockFileEx.restype = ctypes.c_int
+        return kernel32
+
+
+def _try_lock_fd(fd: int, *, exclusive: bool) -> bool:
+    """Attempt a non-blocking shared or exclusive OS lock on ``fd``."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        flags = _LOCKFILE_FAIL_IMMEDIATELY | (
+            _LOCKFILE_EXCLUSIVE_LOCK if exclusive else 0
+        )
+        overlapped = _OVERLAPPED()
+        handle = ctypes.c_void_p(msvcrt.get_osfhandle(fd))
+        if _win32_kernel32().LockFileEx(
+            handle, flags, 0, 1, 0, ctypes.byref(overlapped)
+        ):
+            return True
+        err = ctypes.get_last_error()
+        if err == _ERROR_LOCK_VIOLATION:
+            return False
+        raise ctypes.WinError(err)
+    import fcntl
+
+    mode = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+    try:
+        fcntl.flock(fd, mode)
+        return True
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+            return False
+        raise
+
+
+def _unlock_fd(fd: int) -> None:
+    """Release an OS lock on ``fd`` and close the descriptor."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            overlapped = _OVERLAPPED()
+            handle = ctypes.c_void_p(msvcrt.get_osfhandle(fd))
+            _win32_kernel32().UnlockFileEx(handle, 0, 1, 0, ctypes.byref(overlapped))
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
         os.close(fd)
 
 
@@ -419,6 +548,39 @@ def _validate_existing_ro(
             conn.close()
 
 
+def inspect_file(db_path: Path, busy_timeout_ms: int) -> StorageSnapshot:
+    """Validate one database file read-only and describe it."""
+    schema_version, identity, session_count, turn_count = _validate_existing_ro(
+        db_path, busy_timeout_ms
+    )
+    fact_count = 0
+    memory_enabled: bool | None = None
+    if schema_version >= 3:
+        conn = _open_ro(db_path, busy_timeout_ms)
+        try:
+            fact_count = int(
+                conn.execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0]
+            )
+            row = conn.execute("SELECT enabled FROM memory_settings").fetchone()
+            memory_enabled = bool(row[0]) if row is not None else None
+        except sqlite3.Error as exc:
+            raise CorruptDatabaseError(
+                f"Database '{db_path}' memory tables are unreadable: {exc}."
+            ) from exc
+        finally:
+            conn.close()
+    return StorageSnapshot(
+        exists=True,
+        db_path=db_path,
+        schema_version=schema_version,
+        identity=identity,
+        session_count=session_count,
+        turn_count=turn_count,
+        fact_count=fact_count,
+        memory_enabled=memory_enabled,
+    )
+
+
 class LocalStorage:
     """Manages Bunny.ai's local SQLite state."""
 
@@ -427,6 +589,7 @@ class LocalStorage:
         self.db_path = data_dir / DB_FILENAME
         self.busy_timeout_ms = busy_timeout_ms
         self._conn: sqlite3.Connection | None = None
+        self._session_lock_fd: int | None = None
 
     def __enter__(self) -> LocalStorage:
         return self
@@ -435,10 +598,83 @@ class LocalStorage:
         self.close()
 
     def close(self) -> None:
-        """Close any open SQLite connection cleanly."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        """Close any open SQLite connection cleanly and release the session lock."""
+        try:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+        finally:
+            if self._session_lock_fd is not None:
+                fd = self._session_lock_fd
+                self._session_lock_fd = None
+                _unlock_fd(fd)
+
+    def _acquire_session_shared(self) -> None:
+        """Acquire a shared session lock so restores refuse while a session is open."""
+        if self._session_lock_fd is not None:
+            return
+        ensure_data_dir(self.data_dir)
+        lock_path = self.data_dir / SESSION_LOCK_FILENAME
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        locked = False
+        try:
+            restrict_path_permissions(lock_path, is_dir=False)
+            deadline = time.monotonic() + (self.busy_timeout_ms / 1000.0)
+            while True:
+                if _try_lock_fd(fd, exclusive=False):
+                    locked = True
+                    break
+                if time.monotonic() >= deadline:
+                    raise DatabaseLockedError(
+                        f"Timed out waiting for session lock '{lock_path}'."
+                    )
+                time.sleep(0.01 + random.uniform(0.0, 0.02))
+        except BaseException:
+            if locked:
+                _unlock_fd(fd)
+            else:
+                os.close(fd)
+            raise
+        self._session_lock_fd = fd
+
+    def _finalize_session_open(self) -> None:
+        try:
+            self._acquire_session_shared()
+        except BaseException:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+            raise
+
+    @contextmanager
+    def _acquire_session_exclusive(self) -> Iterator[None]:
+        """Acquire an exclusive session lock when a session lock file exists."""
+        lock_path = self.data_dir / SESSION_LOCK_FILENAME
+        if not lock_path.exists():
+            yield
+            return
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        locked = False
+        try:
+            restrict_path_permissions(lock_path, is_dir=False)
+            timeout_ms = min(self.busy_timeout_ms, 200)
+            deadline = time.monotonic() + (timeout_ms / 1000.0)
+            while True:
+                if _try_lock_fd(fd, exclusive=True):
+                    locked = True
+                    break
+                if time.monotonic() >= deadline:
+                    raise DatabaseLockedError(
+                        "Profile is currently open in another Bunny session. "
+                        "Close active `bunny chat` sessions before restoring a backup."
+                    )
+                time.sleep(0.01 + random.uniform(0.0, 0.02))
+            yield
+        finally:
+            if locked:
+                _unlock_fd(fd)
+            else:
+                os.close(fd)
 
     def _require_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -449,24 +685,171 @@ class LocalStorage:
         """Inspect local database state read-only without creating files."""
         if not self.db_path.exists():
             return StorageSnapshot(exists=False, db_path=self.db_path)
-        schema_version, identity, session_count, turn_count = _validate_existing_ro(
-            self.db_path, self.busy_timeout_ms
-        )
-        return StorageSnapshot(
-            exists=True,
-            db_path=self.db_path,
-            schema_version=schema_version,
-            identity=identity,
-            session_count=session_count,
-            turn_count=turn_count,
-        )
+        return inspect_file(self.db_path, self.busy_timeout_ms)
+
+    @contextmanager
+    def transaction(self, context: str) -> Iterator[sqlite3.Connection]:
+        """Run one ``BEGIN IMMEDIATE`` transaction with rollback on any failure."""
+        conn = self._require_conn()
+        _begin_immediate(conn, self.busy_timeout_ms)
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise _translate_sqlite_error(exc, context) from exc
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+    def query(
+        self, sql: str, params: tuple[object, ...] = (), *, context: str = "query"
+    ) -> list[tuple[object, ...]]:
+        """Run one read statement outside an explicit transaction."""
+        conn = self._require_conn()
+        try:
+            return [tuple(row) for row in conn.execute(sql, params).fetchall()]
+        except sqlite3.Error as exc:
+            raise _translate_sqlite_error(exc, context) from exc
+
+    def list_backups(self) -> tuple[BackupInfo, ...]:
+        """Describe every ``*.sqlite3`` backup without modifying anything."""
+        backups_dir = self.data_dir / "backups"
+        if not backups_dir.is_dir():
+            return ()
+        infos: list[BackupInfo] = []
+        for candidate in sorted(backups_dir.glob("*.sqlite3")):
+            try:
+                snap = inspect_file(candidate, self.busy_timeout_ms)
+            except StorageError as exc:
+                infos.append(BackupInfo(candidate, None, None, 0, 0, problem=str(exc)))
+                continue
+            infos.append(
+                BackupInfo(
+                    path=candidate,
+                    schema_version=snap.schema_version,
+                    identity_id=snap.identity.identity_id if snap.identity else None,
+                    turn_count=snap.turn_count,
+                    fact_count=snap.fact_count,
+                )
+            )
+        return tuple(infos)
+
+    def restore_from_backup(self, backup_path: Path) -> RestoreResult:
+        """Replace the profile database with a validated backup.
+
+        The current database (readable or not) is first preserved in
+        ``backups/``. A backup that belongs to a different identity is refused.
+        Anything written after the backup was taken is lost from the live
+        profile and survives only in the safety copy.
+        """
+        with _acquire_init_lock(self.data_dir, self.busy_timeout_ms):
+            with self._acquire_session_exclusive():
+                snap = inspect_file(backup_path, self.busy_timeout_ms)
+                if snap.identity is None or snap.schema_version is None:
+                    raise StorageError(
+                        f"Backup '{backup_path}' has no usable identity."
+                    )
+                current_damaged = False
+                if self.db_path.exists():
+                    try:
+                        current = inspect_file(self.db_path, self.busy_timeout_ms)
+                    except _RECOVERABLE_DAMAGE_ERRORS:
+                        current = None
+                        current_damaged = True
+                    if (
+                        current is not None
+                        and current.identity is not None
+                        and current.identity.identity_id != snap.identity.identity_id
+                    ):
+                        raise StorageError(
+                            "Backup belongs to a different Bunny identity than this "
+                            "profile; refusing to replace it. Use a fresh --data-dir."
+                        )
+                safety_copy = self._preserve_current_database(damaged=current_damaged)
+                staging = (
+                    self.data_dir / f".{DB_FILENAME}.restore-{uuid.uuid4().hex[:8]}.tmp"
+                )
+                src_conn: sqlite3.Connection | None = None
+                dst_conn: sqlite3.Connection | None = None
+                try:
+                    src_conn = _open_ro(backup_path, self.busy_timeout_ms)
+                    dst_conn = sqlite3.connect(str(staging), isolation_level=None)
+                    src_conn.backup(dst_conn)
+                    dst_conn.close()
+                    dst_conn = None
+                    src_conn.close()
+                    src_conn = None
+                    restrict_path_permissions(staging, is_dir=False)
+                    inspect_file(staging, self.busy_timeout_ms)
+                    journal = _journal_path(self.db_path)
+                    if journal.exists():
+                        journal.unlink()
+                    os.replace(staging, self.db_path)
+                    restrict_path_permissions(self.db_path, is_dir=False)
+                except StorageError:
+                    raise
+                except (OSError, sqlite3.Error) as exc:
+                    raise StorageError(
+                        f"Restore failed; the original profile was preserved at "
+                        f"'{safety_copy}': {exc}"
+                    ) from exc
+                finally:
+                    for conn in (dst_conn, src_conn):
+                        if conn is not None:
+                            conn.close()
+                    if staging.exists():
+                        staging.unlink()
+                return RestoreResult(
+                    restored_from=backup_path,
+                    safety_copy=safety_copy,
+                    identity=snap.identity,
+                    schema_version=snap.schema_version,
+                )
+
+    def _preserve_current_database(self, *, damaged: bool) -> Path | None:
+        if not self.db_path.exists():
+            return None
+        backups_dir = ensure_data_dir(self.data_dir / "backups")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        base = backups_dir / f"bunny-pre-recover-{stamp}-{uuid.uuid4().hex[:8]}"
+        if damaged:
+            # Unreadable or mid-write database: keep the raw bytes untouched.
+            raw = base.with_suffix(".unverified")
+            shutil.copy2(self.db_path, raw)
+            restrict_path_permissions(raw, is_dir=False)
+            journal = _journal_path(self.db_path)
+            if journal.exists():
+                raw_journal = base.with_suffix(".unverified-journal")
+                shutil.copy2(journal, raw_journal)
+                restrict_path_permissions(raw_journal, is_dir=False)
+            return raw
+        target = base.with_suffix(".sqlite3")
+        src_conn = _open_ro(self.db_path, self.busy_timeout_ms)
+        dst_conn = sqlite3.connect(str(target), isolation_level=None)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+        restrict_path_permissions(target, is_dir=False)
+        return target
 
     def _create_verified_backup(self, target_version: int) -> Path:
+        return self.create_backup(f"pre-v{target_version}")
+
+    def create_backup(self, label: str) -> Path:
+        """Create an integrity-verified local backup named ``bunny-<label>-...``.
+
+        Backups are unencrypted copies of the whole database, including
+        transcripts and any facts that existed at that moment.
+        """
         backups_dir = ensure_data_dir(self.data_dir / "backups")
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         backup_path = (
-            backups_dir
-            / f"bunny-pre-v{target_version}-{timestamp}-{uuid.uuid4().hex[:8]}.sqlite3"
+            backups_dir / f"bunny-{label}-{timestamp}-{uuid.uuid4().hex[:8]}.sqlite3"
         )
         src_conn: sqlite3.Connection | None = None
         dst_conn: sqlite3.Connection | None = None
@@ -602,7 +985,12 @@ class LocalStorage:
         return schema_version, identity
 
     def _initialize_fresh(
-        self, *, seed_version: str, style_version: str
+        self,
+        *,
+        seed_version: str,
+        style_version: str,
+        imported: IdentityRecord | None = None,
+        populate: Callable[[sqlite3.Connection], None] | None = None,
     ) -> tuple[IdentityRecord, bool]:
         staging_path = (
             self.data_dir / f"{INIT_STAGING_PREFIX}{uuid.uuid4().hex[:8]}.tmp"
@@ -622,17 +1010,38 @@ class LocalStorage:
                     (migration.version, now, migration.description),
                 )
 
-            identity_id = str(uuid.uuid4())
+            if imported is None:
+                identity_record = IdentityRecord(
+                    identity_id=str(uuid.uuid4()),
+                    seed_version=seed_version,
+                    style_version=style_version,
+                    created_at=now,
+                    awakened_at=now,
+                    onboarding_state="greeted",
+                    updated_at=now,
+                )
+            else:
+                identity_record = imported
             staging_conn.execute(
                 """
                 INSERT INTO identity (
                     singleton, identity_id, seed_version, style_version,
                     created_at, awakened_at, onboarding_state, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, 'greeted', ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (identity_id, seed_version, style_version, now, now, now),
+                (
+                    identity_record.identity_id,
+                    identity_record.seed_version,
+                    identity_record.style_version,
+                    identity_record.created_at,
+                    identity_record.awakened_at,
+                    identity_record.onboarding_state,
+                    identity_record.updated_at,
+                ),
             )
+            if populate is not None:
+                populate(staging_conn)
             staging_conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             staging_conn.execute("COMMIT")
 
@@ -652,16 +1061,7 @@ class LocalStorage:
             staging_path.rename(self.db_path)
             restrict_path_permissions(self.db_path, is_dir=False)
             self._conn = _open_rw(self.db_path, self.busy_timeout_ms)
-            identity = IdentityRecord(
-                identity_id=identity_id,
-                seed_version=seed_version,
-                style_version=style_version,
-                created_at=now,
-                awakened_at=now,
-                onboarding_state="greeted",
-                updated_at=now,
-            )
-            return identity, True
+            return identity_record, True
         except StorageError:
             raise
         except Exception as exc:
@@ -681,6 +1081,35 @@ class LocalStorage:
                     except OSError:
                         pass
 
+    def initialize_imported(
+        self,
+        identity: IdentityRecord,
+        populate: Callable[[sqlite3.Connection], None],
+    ) -> InitResult:
+        """Atomically create a brand-new profile that carries an imported identity.
+
+        Refuses to touch a profile that already has a database file.
+        """
+        with _acquire_init_lock(self.data_dir, self.busy_timeout_ms):
+            if self.db_path.exists():
+                raise StorageError(
+                    f"Database '{self.db_path}' already exists; import was not applied."
+                )
+            self._cleanup_stale_init_files()
+            created, _ = self._initialize_fresh(
+                seed_version=identity.seed_version,
+                style_version=identity.style_version,
+                imported=identity,
+                populate=populate,
+            )
+            self._finalize_session_open()
+            return InitResult(
+                identity=created,
+                is_first_launch=False,
+                schema_version=CURRENT_SCHEMA_VERSION,
+                backup_path=None,
+            )
+
     def initialize_or_load(
         self, *, seed_version: str, style_version: str
     ) -> InitResult:
@@ -699,6 +1128,7 @@ class LocalStorage:
                     identity = _read_identity(self._require_conn())
                 else:
                     self._conn = _open_rw(self.db_path, self.busy_timeout_ms)
+                self._finalize_session_open()
                 return InitResult(
                     identity=identity,
                     is_first_launch=False,
@@ -711,6 +1141,7 @@ class LocalStorage:
                 seed_version=seed_version,
                 style_version=style_version,
             )
+            self._finalize_session_open()
             return InitResult(
                 identity=identity,
                 is_first_launch=is_first_launch,
@@ -850,26 +1281,50 @@ class LocalStorage:
             raise
 
     def load_recent_turns(
-        self, identity_id: str, *, limit: int, retention_days: int
+        self,
+        identity_id: str,
+        *,
+        limit: int,
+        retention_days: int,
+        not_before: str | None = None,
     ) -> tuple[TurnRecord, ...]:
-        """Load recent opt-in history turns within the retention window."""
+        """Load recent opt-in history turns within the retention window.
+
+        ``not_before`` excludes turns created at or before a memory change so
+        stale transcripts cannot automatically repopulate context.
+        """
         conn = self._require_conn()
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
         try:
-            rows = conn.execute(
-                """
-                SELECT t.turn_id, t.session_id, t.turn_index, t.user_text,
-                       t.assistant_text, t.provider_mode, t.created_at
-                FROM turns t
-                JOIN sessions s ON s.session_id = t.session_id
-                WHERE s.identity_id = ? AND s.history_enabled = 1 AND t.created_at >= ?
-                ORDER BY t.created_at DESC, t.turn_index DESC
-                LIMIT ?
-                """,
-                (identity_id, cutoff, limit),
-            ).fetchall()
+            if not_before is not None:
+                rows = conn.execute(
+                    """
+                    SELECT t.turn_id, t.session_id, t.turn_index, t.user_text,
+                           t.assistant_text, t.provider_mode, t.created_at
+                    FROM turns t
+                    JOIN sessions s ON s.session_id = t.session_id
+                    WHERE s.identity_id = ? AND s.history_enabled = 1
+                      AND t.created_at >= ? AND t.created_at > ?
+                    ORDER BY t.created_at DESC, t.turn_index DESC
+                    LIMIT ?
+                    """,
+                    (identity_id, cutoff, not_before, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT t.turn_id, t.session_id, t.turn_index, t.user_text,
+                           t.assistant_text, t.provider_mode, t.created_at
+                    FROM turns t
+                    JOIN sessions s ON s.session_id = t.session_id
+                    WHERE s.identity_id = ? AND s.history_enabled = 1 AND t.created_at >= ?
+                    ORDER BY t.created_at DESC, t.turn_index DESC
+                    LIMIT ?
+                    """,
+                    (identity_id, cutoff, limit),
+                ).fetchall()
         except sqlite3.Error as exc:
             raise _translate_sqlite_error(exc, "load recent turns") from exc
         records = [
@@ -885,6 +1340,46 @@ class LocalStorage:
             for row in reversed(rows)
         ]
         return tuple(records)
+
+    def count_turns(self, identity_id: str, *, not_before: str | None = None) -> int:
+        """Count stored turns, optionally only those eligible for context."""
+        if not_before is not None:
+            rows = self.query(
+                """
+                SELECT COUNT(*) FROM turns t
+                JOIN sessions s ON s.session_id = t.session_id
+                WHERE s.identity_id = ? AND t.created_at > ?
+                """,
+                (identity_id, not_before),
+                context="count turns",
+            )
+        else:
+            rows = self.query(
+                """
+                SELECT COUNT(*) FROM turns t
+                JOIN sessions s ON s.session_id = t.session_id
+                WHERE s.identity_id = ?
+                """,
+                (identity_id,),
+                context="count turns",
+            )
+        return int(str(rows[0][0]))
+
+    def clear_history(self, identity_id: str) -> tuple[int, int]:
+        """Delete every stored transcript turn and session; durable memory is untouched."""
+        with self.transaction("clear history") as conn:
+            turns = conn.execute(
+                """
+                DELETE FROM turns WHERE session_id IN (
+                    SELECT session_id FROM sessions WHERE identity_id = ?
+                )
+                """,
+                (identity_id,),
+            ).rowcount
+            sessions = conn.execute(
+                "DELETE FROM sessions WHERE identity_id = ?", (identity_id,)
+            ).rowcount
+        return max(int(turns), 0), max(int(sessions), 0)
 
     def prune_expired_history(
         self,
