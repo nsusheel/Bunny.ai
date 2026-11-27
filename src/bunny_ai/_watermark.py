@@ -16,7 +16,7 @@ from bunny_ai.errors import StorageError
 
 LEDGER_WATERMARK_FILENAME = ".bunny.ledger.json"
 LEDGER_LOCK_FILENAME = ".bunny.ledger.lock"
-DISPATCH_LOCK_FILENAME = ".bunny.dispatch.lock"
+INFLIGHT_LOCKS_DIR = ".bunny.inflight"
 WATERMARK_FORMAT = "bunny-ai.ledger-watermark"
 WATERMARK_VERSION = 1
 

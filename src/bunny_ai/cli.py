@@ -500,6 +500,7 @@ def _run_budget(args: Options) -> int:
     try:
         ledger = BudgetLedger(storage, init.identity.identity_id)
         ledger.check_and_reconcile_watermark()
+        ledger.recover_stale_intents()
         sub = args.budget_command
 
         if sub is None:
@@ -508,7 +509,11 @@ def _run_budget(args: Options) -> int:
             if attempts:
                 print("Recent attempts:")
                 for att in attempts:
-                    detail = att.refusal_code or att.reason or ""
+                    detail = (
+                        att.refusal_code
+                        or att.reason
+                        or ("in-flight" if att.state == "reserved" else "")
+                    )
                     suffix = f" ({sanitize_terminal_text(detail)})" if detail else ""
                     print(
                         f"  [{att.attempt_id[:8]}] {att.state} | "

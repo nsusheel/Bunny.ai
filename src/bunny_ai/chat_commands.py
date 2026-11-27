@@ -324,7 +324,11 @@ def _spend(session: AwakeningSession, args: list[str]) -> None:
         return
     print("Recent attempts:")
     for att in attempts:
-        detail = att.refusal_code or att.reason or ""
+        detail = (
+            att.refusal_code
+            or att.reason
+            or ("in-flight" if att.state == "reserved" else "")
+        )
         suffix = f" ({_text(detail)})" if detail else ""
         print(
             f"  [{att.attempt_id[:8]}] {att.state} | "

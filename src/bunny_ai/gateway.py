@@ -203,6 +203,7 @@ class ModelGateway:
         clock: Callable[[], datetime] | None = None,
         before_authorize: Callable[[], None] | None = None,
         after_reserve: Callable[[str], None] | None = None,
+        after_transport: Callable[[str, ProviderReceipt], None] | None = None,
         request_timeout_seconds: float = 30.0,
     ) -> None:
         self._storage = storage
@@ -216,6 +217,7 @@ class ModelGateway:
         )
         self._before_authorize = before_authorize
         self._after_reserve = after_reserve
+        self._after_transport = after_transport
         self._request_timeout_seconds = float(request_timeout_seconds)
 
     def prepare(
@@ -396,27 +398,6 @@ class ModelGateway:
         if self._before_authorize is not None:
             self._before_authorize()
 
-        try:
-            self._ledger.reserve_attempt(
-                attempt_id=prepared.attempt_id,
-                idempotency_key=prepared.idempotency_key,
-                profile=prepared.profile,
-                request_digest=prepared.request_digest,
-                expected_consent_digest=prepared.consent_digest,
-                reserved_micro_usd=prepared.reserved_micro_usd,
-                now_utc=self._clock(),
-            )
-        except (DispatchBlockedError, BudgetError, PricingError, GatewayError) as exc:
-            return self._record_and_return_refusal(
-                prepared,
-                refusal_code=exc.refusal_code or "budget_refused",
-                reason=str(exc),
-                now_utc=self._clock(),
-            )
-
-        if self._after_reserve is not None:
-            self._after_reserve(prepared.attempt_id)
-
         dispatch_request = ProviderDispatchRequest(
             attempt_id=prepared.attempt_id,
             idempotency_key=prepared.idempotency_key,
@@ -429,86 +410,122 @@ class ModelGateway:
             deadline_seconds=self._request_timeout_seconds,
         )
 
-        try:
-            with self._ledger.dispatch_lock():
+        with self._ledger.attempt_lock(prepared.attempt_id):
+            try:
+                self._ledger.reserve_attempt(
+                    attempt_id=prepared.attempt_id,
+                    idempotency_key=prepared.idempotency_key,
+                    profile=prepared.profile,
+                    request_digest=prepared.request_digest,
+                    expected_consent_digest=prepared.consent_digest,
+                    reserved_micro_usd=prepared.reserved_micro_usd,
+                    now_utc=self._clock(),
+                )
+            except (
+                DispatchBlockedError,
+                BudgetError,
+                PricingError,
+                GatewayError,
+            ) as exc:
+                return self._record_and_return_refusal(
+                    prepared,
+                    refusal_code=exc.refusal_code or "budget_refused",
+                    reason=str(exc),
+                    now_utc=self._clock(),
+                )
+
+            if self._after_reserve is not None:
+                self._after_reserve(prepared.attempt_id)
+
+            try:
                 receipt = self._transport.send(dispatch_request)
-        except NotDispatchedError as exc:
-            released = self._ledger.release_not_dispatched(
-                prepared.attempt_id,
-                reason=str(exc) or "not_dispatched",
-                now_utc=self._clock(),
-            )
-            return GatewayOutcome(
-                status="released",
-                attempt_id=prepared.attempt_id,
-                idempotency_key=prepared.idempotency_key,
-                reserved_micro_usd=released.reserved_micro_usd,
-                held_micro_usd=0,
-                settled_micro_usd=0,
-                refusal_code="not_dispatched",
-                reason=released.reason,
-            )
-        except (TransportUncertainError, Exception) as exc:
-            held = self._ledger.mark_uncertain_hold(
-                prepared.attempt_id,
-                reason=str(exc) or exc.__class__.__name__,
-                now_utc=self._clock(),
-            )
-            return GatewayOutcome(
-                status="uncertain_hold",
-                attempt_id=prepared.attempt_id,
-                idempotency_key=prepared.idempotency_key,
-                reserved_micro_usd=held.reserved_micro_usd,
-                held_micro_usd=held.held_micro_usd,
-                settled_micro_usd=0,
-                reason=held.reason,
-            )
+            except NotDispatchedError as exc:
+                released = self._ledger.release_not_dispatched(
+                    prepared.attempt_id,
+                    reason=str(exc) or "not_dispatched",
+                    now_utc=self._clock(),
+                )
+                return GatewayOutcome(
+                    status="released",
+                    attempt_id=prepared.attempt_id,
+                    idempotency_key=prepared.idempotency_key,
+                    reserved_micro_usd=released.reserved_micro_usd,
+                    held_micro_usd=0,
+                    settled_micro_usd=0,
+                    refusal_code="not_dispatched",
+                    reason=released.reason,
+                )
+            except KeyboardInterrupt:
+                self._ledger.mark_uncertain_hold(
+                    prepared.attempt_id,
+                    reason="interrupted_during_transport",
+                    now_utc=self._clock(),
+                )
+                raise
+            except (TransportUncertainError, Exception) as exc:
+                held = self._ledger.mark_uncertain_hold(
+                    prepared.attempt_id,
+                    reason=str(exc) or exc.__class__.__name__,
+                    now_utc=self._clock(),
+                )
+                return GatewayOutcome(
+                    status="uncertain_hold",
+                    attempt_id=prepared.attempt_id,
+                    idempotency_key=prepared.idempotency_key,
+                    reserved_micro_usd=held.reserved_micro_usd,
+                    held_micro_usd=held.held_micro_usd,
+                    settled_micro_usd=0,
+                    reason=held.reason,
+                )
 
-        if receipt.attempt_id != prepared.attempt_id:
-            held = self._ledger.mark_uncertain_hold(
-                prepared.attempt_id,
-                reason=(
-                    f"Receipt attempt_id mismatch: expected {prepared.attempt_id!r}, "
-                    f"got {receipt.attempt_id!r}."
-                ),
-                now_utc=self._clock(),
-            )
-            return GatewayOutcome(
-                status="uncertain_hold",
-                attempt_id=prepared.attempt_id,
-                idempotency_key=prepared.idempotency_key,
-                receipt=receipt,
-                reserved_micro_usd=held.reserved_micro_usd,
-                held_micro_usd=held.held_micro_usd,
-                settled_micro_usd=0,
-                reason=held.reason,
-            )
+            if self._after_transport is not None:
+                self._after_transport(prepared.attempt_id, receipt)
 
-        if (
-            receipt.provider_error is not None
-            or not receipt.complete
-            or receipt.usage is None
-        ):
-            held = self._ledger.mark_uncertain_hold(
-                prepared.attempt_id,
-                reason=receipt.provider_error
-                or f"incomplete_receipt:{receipt.finish_reason}",
-                now_utc=self._clock(),
-            )
-            return GatewayOutcome(
-                status="uncertain_hold",
-                attempt_id=prepared.attempt_id,
-                idempotency_key=prepared.idempotency_key,
-                receipt=receipt,
-                reserved_micro_usd=held.reserved_micro_usd,
-                held_micro_usd=held.held_micro_usd,
-                settled_micro_usd=0,
-                reason=held.reason,
-            )
+            if receipt.attempt_id != prepared.attempt_id:
+                held = self._ledger.mark_uncertain_hold(
+                    prepared.attempt_id,
+                    reason=(
+                        f"Receipt attempt_id mismatch: expected {prepared.attempt_id!r}, "
+                        f"got {receipt.attempt_id!r}."
+                    ),
+                    now_utc=self._clock(),
+                )
+                return GatewayOutcome(
+                    status="uncertain_hold",
+                    attempt_id=prepared.attempt_id,
+                    idempotency_key=prepared.idempotency_key,
+                    receipt=receipt,
+                    reserved_micro_usd=held.reserved_micro_usd,
+                    held_micro_usd=held.held_micro_usd,
+                    settled_micro_usd=0,
+                    reason=held.reason,
+                )
 
-        settled = self._ledger.settle_receipt(
-            prepared.attempt_id, receipt, now_utc=self._clock()
-        )
+            if (
+                receipt.provider_error is not None
+                or not receipt.complete
+                or receipt.usage is None
+            ):
+                held = self._ledger.mark_uncertain_hold(
+                    prepared.attempt_id,
+                    reason=receipt.provider_error
+                    or f"incomplete_receipt:{receipt.finish_reason}",
+                    now_utc=self._clock(),
+                )
+                return GatewayOutcome(
+                    status="uncertain_hold",
+                    attempt_id=prepared.attempt_id,
+                    idempotency_key=prepared.idempotency_key,
+                    receipt=receipt,
+                    reserved_micro_usd=held.reserved_micro_usd,
+                    held_micro_usd=held.held_micro_usd,
+                    settled_micro_usd=0,
+                    reason=held.reason,
+                )
+
+            settled = self._ledger.settle_receipt(
+                prepared.attempt_id, receipt, now_utc=self._clock()
+            )
         if settled.state == "overrun_blocked":
             return GatewayOutcome(
                 status="overrun_blocked",

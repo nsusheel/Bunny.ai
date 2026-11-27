@@ -224,6 +224,7 @@ class FileCountingFakeTransport:
         provider: ModelProvider | None = None,
         hold_seconds: float = 0.0,
         crash_after_record: bool = False,
+        on_send: Callable[[str], None] | None = None,
     ) -> None:
         self._counter_path = counter_path
         self._lock_path = counter_path.with_suffix(".lock")
@@ -232,6 +233,7 @@ class FileCountingFakeTransport:
         )
         self._hold_seconds = hold_seconds
         self._crash_after_record = crash_after_record
+        self._on_send = on_send
 
     def send(self, dispatch_request: ProviderDispatchRequest) -> ProviderReceipt:
         """Atomically append dispatch call metadata to disk, optionally hold/crash."""
@@ -253,6 +255,9 @@ class FileCountingFakeTransport:
 
         if self._crash_after_record:
             os._exit(1)
+
+        if self._on_send is not None:
+            self._on_send(dispatch_request.attempt_id)
 
         if self._hold_seconds > 0:
             time.sleep(self._hold_seconds)
@@ -607,7 +612,7 @@ def test_decisive_2_consent_revoked_by_other_process_before_dispatch(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant", ["before_send", "after_send"])
+@pytest.mark.parametrize("variant", ["before_send", "after_send", "after_transport"])
 def test_decisive_3_crash_after_dispatch_intent(tmp_path: Path, variant: str) -> None:
     data_dir = tmp_path / f"crash-{variant}"
     counter_path = tmp_path / f"counter-{variant}.json"
@@ -650,12 +655,16 @@ transport = FileCountingFakeTransport(
     counter_path, crash_after_record=(variant == "after_send")
 )
 after_reserve = (lambda _aid: os._exit(1)) if variant == "before_send" else None
+after_transport = (
+    (lambda _aid, _rcpt: os._exit(1)) if variant == "after_transport" else None
+)
 gateway = ModelGateway(
     storage,
     ledger,
     transport,
     clock=lambda: FIXED_NOW,
     after_reserve=after_reserve,
+    after_transport=after_transport,
 )
 req = ProviderRequest(
     identity_id=init.identity.identity_id,
@@ -1655,3 +1664,240 @@ def test_acceptance_in_process_session_uses_counting_transport(
         summary = session.ledger.summary()
         assert summary.settled_micro_usd == out.settled_micro_usd
         assert summary.held_micro_usd == 0
+
+
+@pytest.mark.parametrize(
+    "pause_point", ["after_reserve", "during_transport", "after_transport"]
+)
+def test_live_worker_paused_protects_reservation_from_second_process(
+    tmp_path: Path, pause_point: str
+) -> None:
+    """A live worker paused across reserve/transport/pre-settle stays reserved across a 2nd process."""
+    data_dir = tmp_path / f"live-{pause_point}"
+    counter_path = tmp_path / f"live-counter-{pause_point}.json"
+    paused_path = tmp_path / f"paused-{pause_point}.json"
+    resume_path = tmp_path / f"resume-{pause_point}.flag"
+    message = f"Live pause test ({pause_point})"
+    reserved = _reservation_for(message)
+
+    storage, ledger, _ = _open_ledger(data_dir)
+    try:
+        ledger.set_allowances(
+            per_request_micro_usd=reserved * 4,
+            cumulative_micro_usd=reserved * 4,
+            now_utc=FIXED_NOW,
+        )
+    finally:
+        storage.close()
+
+    worker_script = """
+import json
+import sys
+import time
+from pathlib import Path
+from bunny_ai.budget import DEFAULT_PROFILE_ID
+from bunny_ai.gateway import ModelGateway
+from bunny_ai.ledger import BudgetLedger
+from bunny_ai.neon import SeedPersonality
+from bunny_ai.providers import ProviderRequest, RequestOptions
+from bunny_ai.storage import LocalStorage
+from test_gateway_acceptance import FIXED_NOW, FileCountingFakeTransport
+
+data_dir = Path(sys.argv[1])
+counter_path = Path(sys.argv[2])
+paused_path = Path(sys.argv[3])
+resume_path = Path(sys.argv[4])
+pause_point = sys.argv[5]
+message = sys.argv[6]
+
+def _wait_for_resume(attempt_id: str) -> None:
+    tmp_file = paused_path.with_suffix(".tmp")
+    tmp_file.write_text(json.dumps({"attempt_id": attempt_id}), encoding="utf-8")
+    tmp_file.replace(paused_path)
+    deadline = time.monotonic() + 25.0
+    while not resume_path.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("Timed out waiting for resume flag")
+        time.sleep(0.02)
+
+storage = LocalStorage(data_dir)
+try:
+    init = storage.initialize_or_load(seed_version="seed-1", style_version="style-1")
+    ledger = BudgetLedger(storage, init.identity.identity_id)
+    ledger.check_and_reconcile_watermark(FIXED_NOW)
+    ledger.recover_stale_intents(FIXED_NOW)
+
+    on_send = (
+        (lambda aid: _wait_for_resume(aid)) if pause_point == "during_transport" else None
+    )
+    transport = FileCountingFakeTransport(counter_path, on_send=on_send)
+    after_reserve = (
+        (lambda aid: _wait_for_resume(aid)) if pause_point == "after_reserve" else None
+    )
+    after_transport = (
+        (lambda aid, _rcpt: _wait_for_resume(aid))
+        if pause_point == "after_transport"
+        else None
+    )
+    gateway = ModelGateway(
+        storage,
+        ledger,
+        transport,
+        clock=lambda: FIXED_NOW,
+        after_reserve=after_reserve,
+        after_transport=after_transport,
+    )
+    req = ProviderRequest(
+        identity_id=init.identity.identity_id,
+        seed_version="seed-1",
+        style_version="style-1",
+        system_seed=SeedPersonality().render_system_seed(),
+        history=(),
+        user_input=message,
+        facts=(),
+    )
+    prepared = gateway.prepare(
+        profile_id=DEFAULT_PROFILE_ID,
+        request=req,
+        options=RequestOptions(max_output_tokens=1_024),
+    )
+    outcome = gateway.dispatch(prepared)
+    print(
+        json.dumps(
+            {
+                "status": outcome.status,
+                "attempt_id": outcome.attempt_id,
+                "reserved_micro_usd": outcome.reserved_micro_usd,
+                "settled_micro_usd": outcome.settled_micro_usd,
+                "held_micro_usd": outcome.held_micro_usd,
+            }
+        )
+    )
+finally:
+    storage.close()
+"""
+
+    env = _subprocess_env(tmp_path, include_tests=True)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            worker_script,
+            str(data_dir),
+            str(counter_path),
+            str(paused_path),
+            str(resume_path),
+            pause_point,
+            message,
+        ],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        deadline = time.monotonic() + 15.0
+        while not paused_path.exists():
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                raise AssertionError(
+                    f"Live worker exited early rc={proc.returncode}: {out}\n{err}"
+                )
+            if time.monotonic() > deadline:
+                raise AssertionError("Timed out waiting for live worker to pause")
+            time.sleep(0.02)
+
+        attempt_id = str(
+            json.loads(paused_path.read_text(encoding="utf-8"))["attempt_id"]
+        )
+        expected_mid_calls = 0 if pause_point == "after_reserve" else 1
+        assert len(read_file_transport_calls(counter_path)) == expected_mid_calls
+
+        # Second real Bunny chat process opens the profile while worker is paused.
+        second_chat = _run_cli(
+            ["chat", "--data-dir", str(data_dir)],
+            env=env,
+            cwd=tmp_path,
+            stdin_text="/spend\n/exit\n",
+        )
+        assert second_chat.returncode == 0, second_chat.stderr
+        assert f"[{attempt_id[:8]}] reserved" in second_chat.stdout
+        assert "uncertain_hold" not in second_chat.stdout
+
+        # Second `bunny budget` process also leaves the live reservation intact.
+        budget_view = _run_cli(
+            ["budget", "--data-dir", str(data_dir)], env=env, cwd=tmp_path
+        )
+        assert budget_view.returncode == 0, budget_view.stderr
+        assert f"[{attempt_id[:8]}] reserved" in budget_view.stdout
+        assert "in-flight" in budget_view.stdout
+
+        # Manual reconciliation or release of the live reservation must be refused.
+        for extra_flag in ("--release", "--settle"):
+            rec_refused = _run_cli(
+                [
+                    "budget",
+                    "reconcile",
+                    attempt_id[:8],
+                    extra_flag,
+                    "--data-dir",
+                    str(data_dir),
+                ],
+                env=env,
+                cwd=tmp_path,
+            )
+            assert rec_refused.returncode == 2
+            assert "currently reserved (in flight)" in rec_refused.stderr
+
+        # SQLite state remains reserved (SQLite TX is closed during pause).
+        conn = sqlite3.connect(str(data_dir / DB_FILENAME), timeout=2.0)
+        try:
+            row = conn.execute(
+                "SELECT state, held_micro_usd, settled_micro_usd FROM gateway_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            assert row == ("reserved", reserved, 0)
+        finally:
+            conn.close()
+
+        assert len(read_file_transport_calls(counter_path)) == expected_mid_calls
+    finally:
+        resume_path.write_text("go\n", encoding="utf-8")
+
+    out, err = proc.communicate(timeout=20)
+    assert proc.returncode == 0, err
+    assert err == ""
+    result = json.loads(out.strip())
+    assert result["status"] == "settled"
+    assert result["attempt_id"] == attempt_id
+    assert result["reserved_micro_usd"] == reserved
+    assert result["held_micro_usd"] == 0
+    assert result["settled_micro_usd"] > 0
+
+    # Sent exactly once across the entire lifecycle.
+    final_calls = read_file_transport_calls(counter_path)
+    assert len(final_calls) == 1
+    assert final_calls[0].attempt_id == attempt_id
+
+    # Settled exactly once in SQLite and ledger summary.
+    storage, ledger, _ = _open_ledger(data_dir)
+    try:
+        summary = ledger.summary()
+        assert summary.settled_count == 1
+        assert summary.uncertain_hold_count == 0
+        assert summary.held_micro_usd == 0
+        assert summary.settled_micro_usd == result["settled_micro_usd"]
+    finally:
+        storage.close()
+
+    conn = sqlite3.connect(str(data_dir / DB_FILENAME))
+    try:
+        rcpt_count = conn.execute(
+            "SELECT COUNT(*) FROM gateway_receipts WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        assert rcpt_count == (1,)
+    finally:
+        conn.close()

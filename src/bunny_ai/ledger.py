@@ -7,17 +7,19 @@ import json
 import os
 import random
 import sqlite3
+import sys
 import time
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal, Protocol
 
 from bunny_ai._watermark import (
     ATTEMPT_COLUMNS,
-    DISPATCH_LOCK_FILENAME,
+    INFLIGHT_LOCKS_DIR,
     LEDGER_LOCK_FILENAME,
     AttemptRecord,
     LedgerWatermark,
@@ -35,7 +37,7 @@ from bunny_ai.budget import (
     price_profile_from_json,
     price_profile_to_json,
 )
-from bunny_ai.config import BudgetSettings, ensure_data_dir, restrict_path_permissions
+from bunny_ai.config import BudgetSettings, ensure_data_dir
 from bunny_ai.errors import (
     BudgetError,
     DatabaseLockedError,
@@ -52,6 +54,44 @@ from bunny_ai.storage import (
 )
 
 MIN_ATTEMPT_REF_CHARS = 4
+
+
+def _restrict_fd_permissions(fd: int) -> None:
+    """Apply owner-only file permissions directly on an open descriptor on POSIX."""
+    if sys.platform != "win32":
+        os.fchmod(fd, 0o600)
+
+
+def _same_open_file(fd: int, path: Path) -> bool:
+    """Return True if ``fd`` still refers to the directory entry at ``path``."""
+    if os.name != "posix":
+        return True
+    try:
+        fd_stat = os.fstat(fd)
+        path_stat = os.stat(path)
+    except FileNotFoundError:
+        return False
+    return (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+
+
+def _release_and_unlink_lock(fd: int, lock_path: Path, *, unlink: bool) -> None:
+    """Release an exclusive file lock and remove its lock file safely per OS."""
+    if os.name == "posix":
+        try:
+            if unlink and _same_open_file(fd, lock_path):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        finally:
+            _unlock_fd(fd)
+    else:
+        _unlock_fd(fd)
+        if unlink:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _iso_utc(now_utc: datetime | None) -> str:
@@ -183,31 +223,43 @@ class BudgetLedger:
         with acquire_exclusive_file_lock(lock_path, self._storage.busy_timeout_ms):
             yield
 
+    def _attempt_lock_path(self, attempt_id: str) -> Path:
+        digest = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:32]
+        return self._storage.data_dir / INFLIGHT_LOCKS_DIR / f"{digest}.lock"
+
     @contextmanager
-    def dispatch_lock(self) -> Iterator[None]:
-        """Hold a shared OS lock while an upstream transport call is in flight."""
-        ensure_data_dir(self._storage.data_dir)
-        lock_path = self._storage.data_dir / DISPATCH_LOCK_FILENAME
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    def attempt_lock(self, attempt_id: str) -> Iterator[None]:
+        """Hold an exclusive OS lock across an attempt's full reserve->send->settle lifecycle."""
+        ensure_data_dir(self._storage.data_dir / INFLIGHT_LOCKS_DIR)
+        lock_path = self._attempt_lock_path(attempt_id)
+        deadline = time.monotonic() + (self._storage.busy_timeout_ms / 1000.0)
+        fd: int | None = None
         locked = False
         try:
-            restrict_path_permissions(lock_path, is_dir=False)
-            deadline = time.monotonic() + (self._storage.busy_timeout_ms / 1000.0)
             while True:
-                if _try_lock_fd(fd, exclusive=False):
-                    locked = True
-                    break
+                candidate_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    _restrict_fd_permissions(candidate_fd)
+                    if _try_lock_fd(candidate_fd, exclusive=True):
+                        if _same_open_file(candidate_fd, lock_path):
+                            fd = candidate_fd
+                            locked = True
+                            break
+                        _unlock_fd(candidate_fd)
+                        continue
+                except BaseException:
+                    os.close(candidate_fd)
+                    raise
+                os.close(candidate_fd)
                 if time.monotonic() >= deadline:
                     raise DatabaseLockedError(
-                        f"Timed out waiting for dispatch lock '{lock_path}'."
+                        f"Timed out waiting for attempt lock '{lock_path}'."
                     )
                 time.sleep(0.01 + random.uniform(0.0, 0.02))
             yield
         finally:
-            if locked:
-                _unlock_fd(fd)
-            else:
-                os.close(fd)
+            if locked and fd is not None:
+                _release_and_unlink_lock(fd, lock_path, unlink=True)
 
     def _write_watermark_from_conn(self, conn: sqlite3.Connection) -> None:
         state = read_db_ledger_state(conn, self._identity_id)
@@ -254,41 +306,111 @@ class BudgetLedger:
                 return stale
 
     def recover_stale_intents(self, now_utc: datetime | None = None) -> int:
-        """Promote orphaned ``reserved`` intents to ``uncertain_hold`` if no dispatcher runs."""
-        ensure_data_dir(self._storage.data_dir)
-        lock_path = self._storage.data_dir / DISPATCH_LOCK_FILENAME
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-        locked = False
-        try:
-            restrict_path_permissions(lock_path, is_dir=False)
-            if not _try_lock_fd(fd, exclusive=True):
-                return 0
-            locked = True
-            now_iso = _iso_utc(now_utc)
-            with self._ledger_lock():
-                with self._storage.transaction("recover stale gateway intents") as conn:
-                    cursor = conn.execute(
-                        """
-                        UPDATE gateway_attempts
-                        SET state = 'uncertain_hold',
-                            reason = 'recovered_after_crash',
-                            updated_at = ?
-                        WHERE identity_id = ? AND state = 'reserved'
-                        """,
-                        (now_iso, self._identity_id),
-                    )
-                    recovered = max(int(cursor.rowcount), 0)
-                if recovered > 0:
-                    with self._storage.read_transaction(
-                        "sync watermark after crash recovery"
+        """Promote abandoned ``reserved`` intents to ``uncertain_hold``; skip live ones."""
+        with self._storage.read_transaction(
+            "list reserved intents for recovery"
+        ) as conn:
+            rows = conn.execute(
+                """
+                SELECT attempt_id FROM gateway_attempts
+                WHERE identity_id = ? AND state = 'reserved'
+                ORDER BY attempt_seq ASC
+                """,
+                (self._identity_id,),
+            ).fetchall()
+        reserved_ids = [str(row[0]) for row in rows]
+        now_iso = _iso_utc(now_utc)
+        recovered = 0
+        inflight_dir = self._storage.data_dir / INFLIGHT_LOCKS_DIR
+
+        if reserved_ids:
+            ensure_data_dir(inflight_dir)
+
+        for attempt_id in reserved_ids:
+            lock_path = self._attempt_lock_path(attempt_id)
+            fd: int | None = None
+            locked = False
+            for _ in range(5):
+                candidate_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    _restrict_fd_permissions(candidate_fd)
+                    if not _try_lock_fd(candidate_fd, exclusive=True):
+                        os.close(candidate_fd)
+                        break
+                    if not _same_open_file(candidate_fd, lock_path):
+                        _unlock_fd(candidate_fd)
+                        continue
+                    fd = candidate_fd
+                    locked = True
+                    break
+                except BaseException:
+                    os.close(candidate_fd)
+                    raise
+            if not locked or fd is None:
+                continue
+            try:
+                with self._ledger_lock():
+                    with self._storage.transaction(
+                        "recover stale gateway intent"
                     ) as conn:
-                        self._write_watermark_from_conn(conn)
-            return recovered
-        finally:
-            if locked:
-                _unlock_fd(fd)
-            else:
-                os.close(fd)
+                        cursor = conn.execute(
+                            """
+                            UPDATE gateway_attempts
+                            SET state = 'uncertain_hold',
+                                reason = 'recovered_after_crash',
+                                updated_at = ?
+                            WHERE identity_id = ?
+                              AND attempt_id = ?
+                              AND state = 'reserved'
+                            """,
+                            (now_iso, self._identity_id, attempt_id),
+                        )
+                        updated_rows = max(int(cursor.rowcount), 0)
+                    if updated_rows > 0:
+                        recovered += updated_rows
+                        with self._storage.read_transaction(
+                            "sync watermark after crash recovery"
+                        ) as conn:
+                            self._write_watermark_from_conn(conn)
+            finally:
+                _release_and_unlink_lock(fd, lock_path, unlink=True)
+
+        # Best-effort cleanup of stale lock files not tied to any active reserved attempt.
+        if inflight_dir.is_dir():
+            active_stems = {
+                hashlib.sha256(aid.encode("utf-8")).hexdigest()[:32]
+                for aid in reserved_ids
+            }
+            cutoff = time.time() - 5.0
+            for candidate in inflight_dir.glob("*.lock"):
+                if candidate.stem in active_stems:
+                    continue
+                try:
+                    if candidate.stat().st_mtime > cutoff:
+                        continue
+                    sweep_fd = os.open(str(candidate), os.O_RDWR)
+                except OSError:
+                    continue
+                sweep_locked = False
+                should_unlink = False
+                try:
+                    if _try_lock_fd(sweep_fd, exclusive=True):
+                        sweep_locked = True
+                        should_unlink = (
+                            _same_open_file(sweep_fd, candidate)
+                            and os.fstat(sweep_fd).st_mtime <= cutoff
+                        )
+                except OSError:
+                    pass
+                finally:
+                    if sweep_locked:
+                        _release_and_unlink_lock(
+                            sweep_fd, candidate, unlink=should_unlink
+                        )
+                    else:
+                        os.close(sweep_fd)
+
+        return recovered
 
     def sync_policy_from_config(
         self, budget_settings: BudgetSettings, now_utc: datetime | None = None
@@ -907,6 +1029,11 @@ class BudgetLedger:
         with self._ledger_lock():
             with self._storage.transaction("reconcile uncertain hold") as conn:
                 attempt = self._require_attempt(conn, target.attempt_id)
+                if attempt.state == "reserved":
+                    raise GatewayError(
+                        f"Attempt '{attempt.attempt_id}' is currently reserved (in flight) "
+                        "and cannot be manually reconciled or released as abandoned."
+                    )
                 if attempt.state != "uncertain_hold" and not (
                     attempt.state == "overrun_blocked" and attempt.held_micro_usd > 0
                 ):

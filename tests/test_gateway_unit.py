@@ -37,6 +37,7 @@ from bunny_ai.config import (
 )
 from bunny_ai.errors import (
     ConfigError,
+    GatewayError,
     NotDispatchedError,
     PricingError,
     TransportUncertainError,
@@ -455,7 +456,7 @@ def test_not_dispatched_releases_and_uncertain_holds_persist(tmp_path: Path) -> 
         storage2.close()
 
 
-def test_crash_recovery_promotes_orphaned_reserved_unless_dispatch_locked(
+def test_crash_recovery_promotes_orphaned_reserved_unless_attempt_locked(
     tmp_path: Path,
 ) -> None:
     storage, ledger, identity_id = _open_ledger(tmp_path)
@@ -477,17 +478,38 @@ def test_crash_recovery_promotes_orphaned_reserved_unless_dispatch_locked(
                     profile_id="sim-default", request=_sample_request(identity_id)
                 )
             )
+        with pytest.raises(RuntimeError, match="simulated hard crash"):
+            gw.dispatch(
+                gw.prepare(
+                    profile_id="sim-default", request=_sample_request(identity_id)
+                )
+            )
 
-        # If another dispatcher holds the shared dispatch lock, recovery leaves it alone.
-        with ledger.dispatch_lock():
-            assert ledger.recover_stale_intents(FIXED_NOW) == 0
-        assert ledger.list_attempts(limit=1)[0].state == "reserved"
+        attempts = ledger.list_attempts(limit=5)
+        assert len(attempts) == 2
+        att_b, att_a = attempts[0], attempts[1]
+        assert att_a.state == "reserved"
+        assert att_b.state == "reserved"
 
-        # Once unlocked, crash recovery promotes orphaned reserved -> uncertain_hold.
+        # Holding att_a's attempt_lock protects att_a while still recovering orphaned att_b.
+        with ledger.attempt_lock(att_a.attempt_id):
+            assert ledger.recover_stale_intents(FIXED_NOW) == 1
+            with pytest.raises(
+                GatewayError, match="currently reserved \\(in flight\\)"
+            ):
+                ledger.reconcile_uncertain_hold(
+                    att_a.attempt_id, action="release", now_utc=FIXED_NOW
+                )
+            refreshed = {a.attempt_id: a for a in ledger.list_attempts(limit=5)}
+            assert refreshed[att_a.attempt_id].state == "reserved"
+            assert refreshed[att_b.attempt_id].state == "uncertain_hold"
+            assert refreshed[att_b.attempt_id].reason == "recovered_after_crash"
+
+        # Once unlocked, crash recovery promotes att_a -> uncertain_hold too.
         assert ledger.recover_stale_intents(FIXED_NOW) == 1
-        att = ledger.list_attempts(limit=1)[0]
-        assert att.state == "uncertain_hold"
-        assert att.reason == "recovered_after_crash"
+        final = {a.attempt_id: a for a in ledger.list_attempts(limit=5)}
+        assert final[att_a.attempt_id].state == "uncertain_hold"
+        assert final[att_a.attempt_id].reason == "recovered_after_crash"
     finally:
         storage.close()
 

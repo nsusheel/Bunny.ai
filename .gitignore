@@ -49,7 +49,7 @@ memories/
 *.db-shm
 .bunny.ledger.json
 .bunny.ledger.lock
-.bunny.dispatch.lock
+.bunny.inflight/
 
 # Exports, backups and caches
 exports/
